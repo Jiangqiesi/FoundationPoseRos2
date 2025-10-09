@@ -128,14 +128,21 @@ class PoseEstimationNode(Node):
         self.depth_sub = self.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
         self.info_sub = self.create_subscription(CameraInfo, '/camera/camera/color/camera_info', self.camera_info_callback, 10)
         
-        self.bridge = CvBridge()
+        self.bridge = CvBridge() # image converter
         self.depth_image = None
         self.color_image = None
         self.cam_K = None  # Initialize cam_K as None until we receive the camera info
         
         # Load meshes
         self.mesh_files = new_file_paths
+        # unit: meter
+        # other obj
+        model_scale = 0.001 # 1mm = 0.001m
+        # # tray
+        # model_scale = 0.05
         self.meshes = [trimesh.load(mesh) for mesh in self.mesh_files]
+        for mesh in self.meshes:
+            mesh.apply_scale(model_scale)
         
         self.bounds = [trimesh.bounds.oriented_bounds(mesh) for mesh in self.meshes]
         self.bboxes = [np.stack([-extents/2, extents/2], axis=0).reshape(2, 3) for _, extents in self.bounds]
@@ -371,6 +378,8 @@ class PoseEstimationNode(Node):
         pose_stamped_msg.pose.orientation.x = transformed_pose[4]
         pose_stamped_msg.pose.orientation.y = transformed_pose[5]
         pose_stamped_msg.pose.orientation.z = transformed_pose[6]
+
+        print(f"pose:{[transformed_pose[i] for i in range(7)]}")
 
         # Publish the transformed pose
         self.pose_publishers[topic_name].publish(pose_stamped_msg)

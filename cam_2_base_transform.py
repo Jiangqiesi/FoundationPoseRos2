@@ -100,13 +100,13 @@ def transformation(pose):
     Tco = Pose_2_mat(p_OwrtC)
 
     p_CwrtB=Pose() 
-    p_CwrtB.position.x=-0.143361
-    p_CwrtB.position.y=-1.45842
-    p_CwrtB.position.z=0.375607
-    p_CwrtB.orientation.w=0.575573
-    p_CwrtB.orientation.x=-0.817741
-    p_CwrtB.orientation.y=-0.00388839
-    p_CwrtB.orientation.z=-0.000290818
+    p_CwrtB.position.x=0.39666805
+    p_CwrtB.position.y=-0.28835216
+    p_CwrtB.position.z=0.30021635
+    p_CwrtB.orientation.w=-0.56591102
+    p_CwrtB.orientation.x=0.82425577
+    p_CwrtB.orientation.y=0.01603566
+    p_CwrtB.orientation.z=0.00948625
     Tbc = Pose_2_mat(p_CwrtB)
 
     Tbo = numpy.matmul(Tbc, Tco)
