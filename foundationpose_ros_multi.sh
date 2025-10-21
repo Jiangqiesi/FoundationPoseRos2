@@ -10,6 +10,8 @@ else
     fi
 fi
 conda activate foundationpose_ros
+# 添加这一行,使用系统的 libstdc++
+export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 source /opt/ros/humble/setup.bash
-export PATH=/usr/local/cuda-12.1/bin${PATH:+:${PATH}}~
+export PATH=/usr/local/cuda/bin${PATH:+:${PATH}}~
 python foundationpose_ros_multi.py

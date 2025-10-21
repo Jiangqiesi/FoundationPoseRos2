@@ -1,3 +1,4 @@
 {
-    "python.analysis.autoImportCompletions": true
+    "python.analysis.autoImportCompletions": true,
+    "cmake.sourceDirectory": "/home/ym/IML/FoundationPoseROS2/FoundationPose/eigen-3.4.0"
 }

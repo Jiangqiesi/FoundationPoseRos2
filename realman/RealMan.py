@@ -87,6 +87,24 @@ class RM_controller:
         # 参数: 目标位置姿态, 速度(%), 加速度(%), 运动半径(mm), 是否阻塞
         success = self.arm_controller.rm_movej_p(pose, 20, 0, 0, 1)
         return success
+    
+    def movej(self, pose):
+        """
+        以关节空间方式移动机械臂到指定的关节角度位置。
+
+        Args:
+            pose (list): 包含7个关节的目标绝对角度 (单位: 度)。
+
+        Returns:
+            int: 底层 `rm_movej` 函数的返回值，通常0表示成功。
+        """
+        if len(pose) != 7:
+            raise ValueError("pose 参数必须包含7个元素，分别对应7个关节的角度")
+        
+        # 使用 movej (关节空间移动) 命令机械臂移动
+        # 参数: 目标关节, 速度(%), 加速度(%), 运动半径(mm), 是否阻塞
+        success = self.arm_controller.rm_movej(pose, 50, 0, 0, 1)
+        return success
 
     def move(self, tech_state):
         """

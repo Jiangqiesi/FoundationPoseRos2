@@ -1,1 +1,5 @@
 # realman/
+FoundationPoses/
+rm_moveit_config/build/
+rm_moveit_config/install/
+rm_moveit_config/log/

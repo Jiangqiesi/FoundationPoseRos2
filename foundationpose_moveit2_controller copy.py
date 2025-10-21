@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import math
 from tarfile import tar_filter
 import rclpy
 from rclpy.node import Node
@@ -52,6 +51,9 @@ class FoundationPoseMoveIt2Controller(Node):
         if self.use_moveit:
             try:
                 self.get_logger().info('正在初始化MoveIt2...')
+                
+                import os
+                import yaml
                 
                 # # 检查配置文件是否存在
                 # config_paths = {
@@ -127,7 +129,7 @@ class FoundationPoseMoveIt2Controller(Node):
                 
                 self.get_logger().info('MoveIt2初始化成功')
                 self.sync_moveit_start_state()
-                # self.create_timer(0.5, self.sync_moveit_start_state)
+                self.create_timer(0.5, self.sync_moveit_start_state)
 
                 # 记录规划组名，便于后续统一使用
                 self.group_name = "rm_robot_arm"  # 你现在就是用的这个名字
@@ -170,6 +172,13 @@ class FoundationPoseMoveIt2Controller(Node):
                 self.get_logger().warn('将回退到直接SDK控制模式')
                 self.use_moveit = False
 
+            except Exception as e:
+                self.get_logger().error(f'MoveIt2初始化失败: {e}')
+                import traceback
+                self.get_logger().error(traceback.format_exc())
+                self.get_logger().warn('将回退到直接SDK控制模式')
+                self.use_moveit = False
+
         for obj_id in self.object_ids:
             topic_name = f'/Current_OBJ_position_{obj_id}'
             self.subscribers[obj_id] = self.create_subscription(
@@ -186,41 +195,6 @@ class FoundationPoseMoveIt2Controller(Node):
         self.get_logger().info(f'控制器初始化完成 - 模式: {mode_str}')
         self.get_logger().info(f'自动移动: {"开启" if self.auto_move else "关闭"}')
         self.get_logger().info(f'抓取功能: {"开启" if self.enable_grasp else "关闭"}')
-
-    def _deg2rad_list(self, vals):
-        return [v * math.pi / 180.0 for v in vals]
-
-    def _rad2deg_list(self, vals):
-        return [v * 180.0 / math.pi for v in vals]
-
-    def _normalize_with_model(self, joint_names, values_rad):
-        """
-        使用 MoveIt 的 RobotState + enforce_bounds() 来按模型界限归一化关节角。
-        不直接访问 RobotModel 的 bounds 接口，避免绑定差异。
-        """
-        rs = RobotState(self.robot_model)
-
-        # 逐个变量设置位置（弧度）
-        for name, v in zip(joint_names, values_rad):
-            # 建议做一次简单 2π wrap，避免极端大数（可选）
-            # v = (v + math.pi) % (2.0 * math.pi) - math.pi
-            rs.set_variable_position(name, float(v))
-
-        rs.update()
-
-        # 让 MoveIt 按 URDF/SRDF 的上下界修正
-        try:
-            rs.enforce_bounds()
-        except Exception:
-            # 某些绑定不抛异常，静默继续
-            pass
-
-        # 读回每个变量的值
-        normalized = []
-        for name in joint_names:
-            # 某些绑定返回 numpy / array，取 float 即可
-            normalized.append(float(rs.get_variable_position(name)))
-        return normalized
 
     def get_robot_description(self):
         urdf_path = "/home/ym/IML/FoundationPoseROS2/rm_moveit_config/src/rm_75_6f_description/urdf/rm_75_6f_description.urdf"
@@ -257,41 +231,29 @@ class FoundationPoseMoveIt2Controller(Node):
             return
 
         # 从实物控制器读取当前关节角
-        raw_joints = list(self.rm_controller.get_state())  # 硬件读数，多半是“度”
-        if len(raw_joints) != len(joint_names):
+        current_joints = list(self.rm_controller.get_state())
+
+        # 这里假设 rm_controller.get_state() 返回的顺序与 joint_names 一致；
+        # 若不一致，建议做一次名称-索引映射以重排
+        if len(current_joints) != len(joint_names):
             self.get_logger().warn(
-                f'当前关节数({len(raw_joints)})与规划组({len(joint_names)})不一致，请确认映射关系'
+                f'当前关节数({len(current_joints)})与规划组({len(joint_names)})不一致，请确认映射关系'
             )
-        if any(abs(v) > 10 for v in raw_joints):
-            self.get_logger().info('检测到硬件关节值疑似为“度”，将自动转换为弧度')
 
-        # ——关键：度→弧度——
-        joints_rad = self._deg2rad_list(raw_joints)
-
-        # # 使用 RobotState + enforce_bounds() 做模型归一化
-        # joints_rad = self._normalize_with_model(joint_names, joints_rad)
-
-        # 发布 joint_states（注意：ROS 的惯例是“弧度”）
+        # 发布 /joint_states 供可视化/TF
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
         js.name = joint_names
-        js.position = joints_rad
+        print(f"joint_names: {joint_names}")
+        js.position = current_joints
         self.joint_state_pub.publish(js)
 
-        # 同步到 MoveIt 的 start_state（弧度）
+        # 同步 MoveIt 的 start_state
         robot_state = RobotState(self.robot_model)
         # robot_state.set_variable_positions(dict(zip(joint_names, current_joints)))
-        robot_state.set_joint_group_active_positions(self.group_name, np.asarray(joints_rad, dtype=float))
+        robot_state.set_joint_group_active_positions(self.group_name, current_joints)
         robot_state.update()
-        # self.arm.set_start_state(robot_state)
-        try:
-            # 再做一次边界检查/收敛，防止数值边界触发
-            robot_state.enforce_bounds()
-        except Exception:
-            pass
-        ok = self.arm.set_start_state(robot_state=robot_state)   # ← 关键修复
-        if not ok:
-            self.get_logger().warn('set_start_state() 返回 False，请检查关节名/范围/组名是否匹配')
+        self.arm.set_start_state(robot_state)
 
     def convert_pose_to_realman_format(self, pose_msg, z_offset=0.0):
         x = pose_msg.pose.position.x
@@ -299,20 +261,12 @@ class FoundationPoseMoveIt2Controller(Node):
         z = pose_msg.pose.position.z + self.offset_z + z_offset
 
         orientation = pose_msg.pose.orientation
-        # quat_xyzw = np.array([orientation.x, orientation.y, orientation.z, orientation.w], dtype=np.float64)
+        quat = [orientation.x, orientation.y, orientation.z, orientation.w]
+        euler = R.from_quat(quat).as_euler('xyz', degrees=False)
+
+        # target_pose = [x, y, z, 0, 1.57, 0]
         # test
-        quat_xyzw = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
-        print(f"收到物体位姿: x={x:.4f}, y={y:.4f}, z={z:.4f}, "
-              f"quat_xyzw={quat_xyzw}")
-        euler_rpy = R.from_quat(quat_xyzw).as_euler('xyz', degrees=False)
-        print(
-            f"真实目标位姿: x={x:.4f}, y={y:.4f}, z={z:.4f}, "
-            f"roll={euler_rpy[0]:.2f}, pitch={euler_rpy[1]:.2f}, yaw={euler_rpy[2]:.2f}"
-        )
-        # target_pose = [x, y, z, euler_rpy[0], euler_rpy[1], euler_rpy[2]]
-        
-        # test
-        target_pose = [0.344210, -0.278745, 0.468456, euler_rpy[0], euler_rpy[1], euler_rpy[2]]
+        target_pose = [0.421877, 0.209509, 0.247668, 1.999, -0.067, -0.689]
 
         return target_pose
 
@@ -368,13 +322,11 @@ class FoundationPoseMoveIt2Controller(Node):
             for i, point in enumerate(jt.points):
                 # point.positions 是与 jt.joint_names 对齐的 tuple
                 positions = [point.positions[name_to_index[n]] for n in group_joint_order]
-                # positions_stamped 是按 group_joint_order 排好序、单位=弧度 的序列
-                positions_deg = self._rad2deg_list(positions)
-                result = self.rm_controller.movej(positions_deg)
+                result = self.rm_controller.movej(list(positions))
                 if result != 0:
                     self.get_logger().error(f'执行路点 {i} 失败，错误码: {result}')
                     return False
-                time.sleep(1)
+                time.sleep(2)
 
             self.get_logger().info('轨迹执行完成')
             return True
@@ -525,14 +477,8 @@ class FoundationPoseMoveIt2Controller(Node):
 
                 if self.use_moveit:
                     x, y, z = target_pose[0], target_pose[1], target_pose[2]
-                    # RealMan接口使用的姿态是Roll/Pitch/Yaw，需要转成四元数给MoveIt
-                    rpy = np.array(target_pose[3:6], dtype=np.float64) if len(target_pose) >= 6 else np.zeros(3, dtype=np.float64)
-                    base_rotation = R.from_euler('xyz', rpy, degrees=False)
-                    # MoveIt的末端坐标系相对RealMan SDK存在约90°的绕Y轴偏差，提前补偿
-                    moveit_compensation = R.from_euler('y', math.pi / 2.0, degrees=False)
-                    compensated_rotation = moveit_compensation * base_rotation
-                    quat_xyzw = compensated_rotation.as_quat()
-                    target_pose_stamped = self.create_pose_stamped(x, y, z, quat_xyzw)
+                    quat = [0.0, 0.707, 0.0, 0.707]
+                    target_pose_stamped = self.create_pose_stamped(x, y, z, quat)
 
                     success = self.move_with_moveit(target_pose_stamped)
                     if not success:

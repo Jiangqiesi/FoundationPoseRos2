@@ -5,9 +5,9 @@ moveit_setup_assistant_config:
   srdf:
     relative_path: config/rm_75_6f_description.srdf
   package_settings:
-    author_name: zhibang
+    author_name: iml
     author_email: 825387030@qq.com
-    generated_timestamp: 1759909474
+    generated_timestamp: 1760538012
   control_xacro:
     command:
       - position
