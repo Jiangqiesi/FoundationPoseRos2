@@ -1,0 +1,134 @@
+1761812965.8673456 [INFO] [launch]: All log files can be found below /home/ym/.ros/log/2025-10-30-16-29-25-866344-ym-Precision-5860-Tower-55222
+1761812965.8675458 [INFO] [launch]: Default logging verbosity is set to INFO
+1761812966.7349429 [INFO] [static_transform_publisher-1]: process started with pid [55267]
+1761812966.7351584 [INFO] [robot_state_publisher-2]: process started with pid [55270]
+1761812966.7352142 [INFO] [move_group-3]: process started with pid [55273]
+1761812966.7352602 [INFO] [rviz2-4]: process started with pid [55275]
+1761812966.7353005 [INFO] [ros2_control_node-5]: process started with pid [55277]
+1761812966.7353404 [INFO] [spawner-6]: process started with pid [55279]
+1761812966.7353768 [INFO] [spawner-7]: process started with pid [55281]
+1761812966.7354109 [INFO] [spawner-8]: process started with pid [55283]
+1761812966.7701132 [static_transform_publisher-1] [INFO] [1761812966.769672184] [static_transform_publisher0]: Spinning until stopped - publishing transform
+1761812966.7702990 [static_transform_publisher-1] translation: ('0.000000', '0.000000', '0.000000')
+1761812966.7703352 [static_transform_publisher-1] rotation: ('0.000000', '0.000000', '0.000000', '1.000000')
+1761812966.7703626 [static_transform_publisher-1] from 'world' to 'base_link'
+1761812966.7759519 [ros2_control_node-5] [WARN] [1761812966.775858918] [controller_manager]: [Deprecated] Passing the robot description parameter directly to the control_manager node is deprecated. Use '~/robot_description' topic from 'robot_state_publisher' instead.
+1761812966.7762904 [ros2_control_node-5] [INFO] [1761812966.776237598] [resource_manager]: Loading hardware 'FakeSystem' 
+1761812966.7769420 [ros2_control_node-5] [INFO] [1761812966.776886434] [resource_manager]: Initialize hardware 'FakeSystem' 
+1761812966.7770751 [ros2_control_node-5] [INFO] [1761812966.776932332] [resource_manager]: Successful initialization of hardware 'FakeSystem'
+1761812966.7771118 [ros2_control_node-5] [INFO] [1761812966.776978448] [resource_manager]: 'configure' hardware 'FakeSystem' 
+1761812966.7771394 [ros2_control_node-5] [INFO] [1761812966.776984704] [resource_manager]: Successful 'configure' of hardware 'FakeSystem'
+1761812966.7771647 [ros2_control_node-5] [INFO] [1761812966.776990755] [resource_manager]: 'activate' hardware 'FakeSystem' 
+1761812966.7771876 [ros2_control_node-5] [INFO] [1761812966.776993947] [resource_manager]: Successful 'activate' of hardware 'FakeSystem'
+1761812966.7808356 [ros2_control_node-5] [INFO] [1761812966.780568249] [controller_manager]: update rate is 100 Hz
+1761812966.7809730 [ros2_control_node-5] [INFO] [1761812966.780598765] [controller_manager]: Spawning controller_manager RT thread with scheduler priority: 50
+1761812966.7811978 [ros2_control_node-5] [WARN] [1761812966.780778473] [controller_manager]: No real-time kernel detected on this system. See [https://control.ros.org/master/doc/ros2_control/controller_manager/doc/userdoc.html] for details on how to enable realtime scheduling.
+1761812966.9799619 [ros2_control_node-5] [INFO] [1761812966.979693459] [controller_manager]: Loading controller 'rm_arm_controller'
+1761812966.9887638 [ros2_control_node-5] [WARN] [1761812966.988543986] [rm_arm_controller]: [Deprecated]: "allow_nonzero_velocity_at_trajectory_end" is set to true. The default behavior will change to false.
+1761812966.9913206 [ros2_control_node-5] [INFO] [1761812966.991216162] [controller_manager]: Loading controller 'revo_hand_controller'
+1761812967.0012658 [ros2_control_node-5] [INFO] [1761812967.001138058] [controller_manager]: Loading controller 'joint_state_broadcaster'
+1761812967.0113213 [ros2_control_node-5] [INFO] [1761812967.011117218] [controller_manager]: Configuring controller 'rm_arm_controller'
+1761812967.0116942 [ros2_control_node-5] [INFO] [1761812967.011285933] [rm_arm_controller]: No specific joint names are used for command interfaces. Using 'joints' parameter.
+1761812967.0118241 [ros2_control_node-5] [INFO] [1761812967.011300619] [rm_arm_controller]: Command interfaces are [position] and state interfaces are [position velocity].
+1761812967.0118682 [ros2_control_node-5] [INFO] [1761812967.011319815] [rm_arm_controller]: Using 'splines' interpolation method.
+1761812967.0128026 [ros2_control_node-5] [INFO] [1761812967.012717716] [rm_arm_controller]: Controller state will be published at 50.00 Hz.
+1761812967.0155106 [ros2_control_node-5] [INFO] [1761812967.015448706] [rm_arm_controller]: Action status changes will be monitored at 20.00 Hz.
+1761812967.0212007 [ros2_control_node-5] [INFO] [1761812967.021038572] [controller_manager]: Configuring controller 'revo_hand_controller'
+1761812967.0214348 [ros2_control_node-5] [INFO] [1761812967.021083354] [revo_hand_controller]: Action status changes will be monitored at 20.000000 Hz.
+1761812967.0313175 [ros2_control_node-5] [INFO] [1761812967.031172940] [controller_manager]: Configuring controller 'joint_state_broadcaster'
+1761812967.0315158 [ros2_control_node-5] [INFO] [1761812967.031232251] [joint_state_broadcaster]: 'joints' or 'interfaces' parameter is empty. All available state interfaces will be published
+1761812967.0418024 [ros2_control_node-5] [ERROR] [1761812967.041414663] [resource_manager]: Not acceptable command interfaces combination: 
+1761812967.0420675 [ros2_control_node-5] Start interfaces: 
+1761812967.0421984 [ros2_control_node-5] [
+1761812967.0423055 [ros2_control_node-5]   joint1/position
+1761812967.0424025 [ros2_control_node-5]   joint2/position
+1761812967.0424523 [ros2_control_node-5]   joint3/position
+1761812967.0424943 [ros2_control_node-5]   joint4/position
+1761812967.0425367 [ros2_control_node-5]   joint5/position
+1761812967.0425787 [ros2_control_node-5]   joint6/position
+1761812967.0426178 [ros2_control_node-5]   joint7/position
+1761812967.0426409 [ros2_control_node-5]   arm_to_adapter/position
+1761812967.0426688 [ros2_control_node-5]   adapter_to_hand/position
+1761812967.0426898 [ros2_control_node-5] ]
+1761812967.0427105 [ros2_control_node-5] Stop interfaces: 
+1761812967.0427315 [ros2_control_node-5] [
+1761812967.0427587 [ros2_control_node-5] ]
+1761812967.0427842 [ros2_control_node-5] Not existing: 
+1761812967.0428030 [ros2_control_node-5] [
+1761812967.0428226 [ros2_control_node-5]  arm_to_adapter/position
+1761812967.0428424 [ros2_control_node-5]  adapter_to_hand/position
+1761812967.0428615 [ros2_control_node-5] ]
+1761812967.0428808 [ros2_control_node-5] 
+1761812967.0429049 [ros2_control_node-5] [ERROR] [1761812967.041481373] [controller_manager]: Could not switch controllers since prepare command mode switch was rejected.
+1761812967.0430825 [ros2_control_node-5] [ERROR] [1761812967.041886575] [resource_manager]: Not acceptable command interfaces combination: 
+1761812967.0431166 [ros2_control_node-5] Start interfaces: 
+1761812967.0431411 [ros2_control_node-5] [
+1761812967.0431635 [ros2_control_node-5]   adapter_to_hand/position
+1761812967.0431848 [ros2_control_node-5] ]
+1761812967.0432041 [ros2_control_node-5] Stop interfaces: 
+1761812967.0432239 [ros2_control_node-5] [
+1761812967.0432439 [ros2_control_node-5] ]
+1761812967.0432682 [ros2_control_node-5] Not existing: 
+1761812967.0432932 [ros2_control_node-5] [
+1761812967.0433123 [ros2_control_node-5]  adapter_to_hand/position
+1761812967.0433338 [ros2_control_node-5] ]
+1761812967.0433524 [ros2_control_node-5] 
+1761812967.0433710 [ros2_control_node-5] [ERROR] [1761812967.041929630] [controller_manager]: Could not switch controllers since prepare command mode switch was rejected.
+1761812967.1778414 [ERROR] [spawner-7]: process has died [pid 55281, exit code 1, cmd '/opt/ros/humble/lib/controller_manager/spawner revo_hand_controller --ros-args'].
+1761812967.1786268 [ERROR] [spawner-6]: process has died [pid 55279, exit code 1, cmd '/opt/ros/humble/lib/controller_manager/spawner rm_arm_controller --ros-args'].
+1761812967.1946814 [INFO] [spawner-8]: process has finished cleanly [pid 55283]
+1761812967.3008304 [rviz2-4] [INFO] [1761812967.300417611] [rviz2]: Stereo is NOT SUPPORTED
+1761812967.3010929 [rviz2-4] [INFO] [1761812967.300497481] [rviz2]: OpenGl version: 4.6 (GLSL 4.6)
+1761812967.3265514 [rviz2-4] [INFO] [1761812967.326266102] [rviz2]: Stereo is NOT SUPPORTED
+1761812967.3967724 [rviz2-4] Warning: class_loader.impl: SEVERE WARNING!!! A namespace collision has occurred with plugin factory for class rviz_default_plugins::displays::InteractiveMarkerDisplay. New factory will OVERWRITE existing one. This situation occurs when libraries containing plugins are directly linked against an executable (the one running right now generating this message). Please separate plugins out into their own library or just don't link against the library and use either class_loader::ClassLoader/MultiLibraryClassLoader to open.
+1761812967.3969717 [rviz2-4]          at line 253 in /opt/ros/humble/include/class_loader/class_loader/class_loader_core.hpp
+1761812970.4146757 [rviz2-4] [ERROR] [1761812970.414095784] [moveit_ros_visualization.motion_planning_frame]: Action server: /recognize_objects not available
+1761812970.4268084 [rviz2-4] [INFO] [1761812970.426517236] [moveit_ros_visualization.motion_planning_frame]: MoveGroup namespace changed: / -> . Reloading params.
+1761812970.4966471 [rviz2-4] [INFO] [1761812970.496359186] [moveit_rdf_loader.rdf_loader]: Loaded robot model in 0.0345805 seconds
+1761812970.4967964 [rviz2-4] [INFO] [1761812970.496394840] [moveit_robot_model.robot_model]: Loading robot model 'rm_arm_with_revo_hand'...
+1761812970.7115965 [rviz2-4] [WARN] [1761812970.711337445] [kdl_parser]: The root link base_link has an inertia specified in the URDF, but KDL does not support a root link with an inertia.  As a workaround, you can add an extra dummy link to your URDF.
+1761812971.3257661 [rviz2-4] [INFO] [1761812971.325340007] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Starting planning scene monitor
+1761812971.3264618 [rviz2-4] [INFO] [1761812971.326094125] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Listening to '/monitored_planning_scene'
+1761812971.6425834 [rviz2-4] [INFO] [1761812971.642282461] [interactive_marker_display_107013882618528]: Connected on namespace: /rviz_moveit_motion_planning_display/robot_interaction_interactive_marker_topic
+1761812971.6531568 [rviz2-4] [INFO] [1761812971.652986456] [moveit_ros_robot_interaction.robot_interaction]: No active joints or end effectors found for group 'revo_hand'. Make sure that kinematics.yaml is loaded in this node's namespace.
+1761812971.6535573 [rviz2-4] [WARN] [1761812971.653482776] [kdl_parser]: The root link base_link has an inertia specified in the URDF, but KDL does not support a root link with an inertia.  As a workaround, you can add an extra dummy link to your URDF.
+1761812971.6537092 [rviz2-4] [INFO] [1761812971.653592556] [moveit_ros_robot_interaction.robot_interaction]: No active joints or end effectors found for group 'revo_hand'. Make sure that kinematics.yaml is loaded in this node's namespace.
+1761812971.6584847 [rviz2-4] [INFO] [1761812971.658382476] [moveit_ros_visualization.motion_planning_frame]: group revo_hand
+1761812971.6585474 [rviz2-4] [INFO] [1761812971.658396029] [moveit_ros_visualization.motion_planning_frame]: Constructing new MoveGroup connection for group 'revo_hand' in namespace ''
+1761812971.6622903 [rviz2-4] [INFO] [1761812971.662163930] [move_group_interface]: Ready to take commands for planning group revo_hand.
+1761812971.6625819 [rviz2-4] [INFO] [1761812971.662519851] [moveit_ros_visualization.motion_planning_frame]: group revo_hand
+1761812971.7035205 [rviz2-4] [INFO] [1761812971.703336549] [interactive_marker_display_107013882618528]: Sending request for interactive markers
+1761812971.7385416 [rviz2-4] [INFO] [1761812971.738155761] [interactive_marker_display_107013882618528]: Service response received for initialization
+1761812998.7553594 [rviz2-4] [INFO] [1761812998.754965344] [moveit_ros_visualization.motion_planning_frame]: group rm_arm
+1761812998.7555640 [rviz2-4] [INFO] [1761812998.755004302] [moveit_ros_visualization.motion_planning_frame]: Constructing new MoveGroup connection for group 'rm_arm' in namespace ''
+1761812998.7599361 [rviz2-4] [INFO] [1761812998.759703711] [move_group_interface]: Ready to take commands for planning group rm_arm.
+1761813000.1880615 [rviz2-4] [INFO] [1761813000.187586995] [moveit_ros_robot_interaction.robot_interaction]: No active joints or end effectors found for group 'revo_hand'. Make sure that kinematics.yaml is loaded in this node's namespace.
+1761813000.1887236 [rviz2-4] [INFO] [1761813000.188613797] [moveit_ros_visualization.motion_planning_frame]: group revo_hand
+1761813000.1887784 [rviz2-4] [INFO] [1761813000.188640516] [moveit_ros_visualization.motion_planning_frame]: Constructing new MoveGroup connection for group 'revo_hand' in namespace ''
+1761813000.1937151 [rviz2-4] [INFO] [1761813000.193394895] [move_group_interface]: Ready to take commands for planning group revo_hand.
+1761813003.2336278 [rviz2-4] [INFO] [1761813003.233229271] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Stopping planning scene monitor
+1761813004.8765221 [WARNING] [launch]: user interrupted with ctrl-c (SIGINT)
+1761813004.8799367 [static_transform_publisher-1] [INFO] [1761813004.876191241] [rclcpp]: signal_handler(signum=2)
+1761813004.8800890 [ros2_control_node-5] [INFO] [1761813004.876320728] [rclcpp]: signal_handler(signum=2)
+1761813004.8801310 [ros2_control_node-5] [INFO] [1761813004.876555442] [controller_manager]: Shutdown request received....
+1761813004.8801615 [ros2_control_node-5] [INFO] [1761813004.876741343] [controller_manager]: Shutting down all controllers in the controller manager.
+1761813004.8801894 [ros2_control_node-5] [INFO] [1761813004.876791646] [controller_manager]: Shutting down controller 'rm_arm_controller'
+1761813004.8802149 [ros2_control_node-5] [INFO] [1761813004.876875792] [controller_manager]: Shutting down controller 'revo_hand_controller'
+1761813004.8803070 [ros2_control_node-5] [INFO] [1761813004.876975136] [controller_manager]: Deactivating controller 'joint_state_broadcaster'
+1761813004.8803384 [ros2_control_node-5] [INFO] [1761813004.877147813] [controller_manager]: Shutting down controller 'joint_state_broadcaster'
+1761813004.8803647 [ros2_control_node-5] [INFO] [1761813004.877232389] [resource_manager]: 'deactivate' hardware 'FakeSystem' 
+1761813004.8803895 [ros2_control_node-5] [INFO] [1761813004.877247040] [resource_manager]: Successful 'deactivate' of hardware 'FakeSystem'
+1761813004.8804128 [ros2_control_node-5] [INFO] [1761813004.877252091] [resource_manager]: 'shutdown' hardware 'FakeSystem' 
+1761813004.8804376 [ros2_control_node-5] [INFO] [1761813004.877258538] [resource_manager]: Successful 'shutdown' of hardware 'FakeSystem'
+1761813004.8804607 [ros2_control_node-5] [INFO] [1761813004.877262809] [controller_manager]: Shutting down the controller manager.
+1761813004.9894483 [INFO] [static_transform_publisher-1]: process has finished cleanly [pid 55267]
+1761813004.9906318 [INFO] [robot_state_publisher-2]: process has finished cleanly [pid 55270]
+1761813005.0202982 [INFO] [ros2_control_node-5]: process has finished cleanly [pid 55277]
+1761813009.8855181 [ERROR] [rviz2-4]: process[rviz2-4] failed to terminate '5' seconds after receiving 'SIGINT', escalating to 'SIGTERM'
+1761813009.8868010 [ERROR] [move_group-3]: process[move_group-3] failed to terminate '5' seconds after receiving 'SIGINT', escalating to 'SIGTERM'
+1761813009.8879120 [INFO] [rviz2-4]: sending signal 'SIGTERM' to process[rviz2-4]
+1761813009.8883061 [INFO] [move_group-3]: sending signal 'SIGTERM' to process[move_group-3]
+1761813012.5323653 [ERROR] [rviz2-4]: process has died [pid 55275, exit code -11, cmd '/opt/ros/humble/lib/rviz2/rviz2 -d /home/ym/IML/FoundationPoseROS2/rm_moveit_config/install/single_rm_robot_config/share/single_rm_robot_config/config/moveit.rviz --ros-args --params-file /tmp/launch_params_1f05lk9x --params-file /tmp/launch_params_vh2bwfsb --params-file /tmp/launch_params_dskixb5f'].
+1761813014.8824632 [ERROR] [move_group-3]: process[move_group-3] failed to terminate '10.0' seconds after receiving 'SIGTERM', escalating to 'SIGKILL'
+1761813014.8831131 [INFO] [move_group-3]: sending signal 'SIGKILL' to process[move_group-3]
+1761813014.9000018 [ERROR] [move_group-3]: process has died [pid 55273, exit code -9, cmd '/opt/ros/humble/lib/moveit_ros_move_group/move_group --ros-args --params-file /tmp/launch_params_4ddpsip6 --params-file /tmp/launch_params_3lqr5zze'].

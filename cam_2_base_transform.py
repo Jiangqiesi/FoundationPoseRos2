@@ -98,15 +98,22 @@ def transformation(pose):
     p_OwrtC.orientation.y=float(pose[4])
     p_OwrtC.orientation.z=float(pose[5])
     Tco = Pose_2_mat(p_OwrtC)
-
+    """
+2025-11-30 20:27:22 - __main__ - INFO: 平移向量是:
+ [[0.44013808]
+ [0.28768251]
+ [0.63119356]]
+2025-11-30 20:27:22 - __main__ - INFO: 四元数是：
+ [ 0.34867125  0.88298745 -0.30888031 -0.0579178 ]
+    """
     p_CwrtB=Pose() 
-    p_CwrtB.position.x=0.39666805
-    p_CwrtB.position.y=-0.28835216
-    p_CwrtB.position.z=0.30021635
-    p_CwrtB.orientation.w=-0.56591102
-    p_CwrtB.orientation.x=0.82425577
-    p_CwrtB.orientation.y=0.01603566
-    p_CwrtB.orientation.z=0.00948625
+    p_CwrtB.position.x = 0.41013808
+    p_CwrtB.position.y = 0.23768251
+    p_CwrtB.position.z = 0.65119356
+    p_CwrtB.orientation.w = -0.0579178
+    p_CwrtB.orientation.x = 0.34867125
+    p_CwrtB.orientation.y = 0.88298745
+    p_CwrtB.orientation.z = -0.30888031
     Tbc = Pose_2_mat(p_CwrtB)
 
     Tbo = numpy.matmul(Tbc, Tco)

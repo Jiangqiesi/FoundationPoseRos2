@@ -641,7 +641,6 @@ class FoundationPoseMoveIt2Controller(Node):
                     self.get_logger().warn('组合抓取规划失败，回退到原有流程')
 
             if self.enable_grasp:
-                # TODO: fix with condition of grasp pose 
                 return self.grasp_and_lift_sequence(object_id, pose_msg)
             else:
                 target_pose = self.convert_pose_to_realman_format(pose_msg)

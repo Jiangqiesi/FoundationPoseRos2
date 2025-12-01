@@ -44,12 +44,33 @@ class FileSelectorGUI:
     def __init__(self, master, file_paths):
         self.master = master
         self.master.title("Library: Sequence Selector")
+        # Normalize DPI scaling so buttons are not oversized on HiDPI displays
+        try:
+            self.master.tk.call("tk", "scaling", 1.0)
+        except tk.TclError:
+            pass
+        self.master.geometry("520x380")
+        self.master.minsize(420, 320)
+        self.master.configure(padx=10, pady=10)
+
         self.file_paths = file_paths
         self.reordered_paths = None  # Store the reordered paths here
 
-        # Create a listbox to display the file names
-        self.listbox = Listbox(master, selectmode="extended", width=50, height=10)
-        self.listbox.pack()
+        # Listbox with scrollbar so the layout stays compact
+        list_frame = tk.Frame(master)
+        list_frame.pack(fill="both", expand=True)
+        scrollbar = tk.Scrollbar(list_frame, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+        self.listbox = Listbox(
+            list_frame,
+            selectmode="extended",
+            width=50,
+            height=10,
+            font=("Helvetica", 10),
+            yscrollcommand=scrollbar.set,
+        )
+        self.listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=self.listbox.yview)
 
         # Populate the listbox with file names without extensions
         for file_path in self.file_paths:
@@ -57,13 +78,15 @@ class FileSelectorGUI:
             self.listbox.insert(END, file_name)
 
         # Buttons for rearranging the order
-        self.up_button = Button(master, text="Move Up", command=self.move_up)
+        btn_frame = tk.Frame(master)
+        btn_frame.pack(fill="x", pady=(8, 0))
+        self.up_button = Button(btn_frame, text="Move Up", command=self.move_up, width=12, font=("Helvetica", 10))
         self.up_button.pack(side="left", padx=5, pady=5)
 
-        self.down_button = Button(master, text="Move Down", command=self.move_down)
+        self.down_button = Button(btn_frame, text="Move Down", command=self.move_down, width=12, font=("Helvetica", 10))
         self.down_button.pack(side="left", padx=5, pady=5)
 
-        self.done_button = Button(master, text="Done", command=self.done)
+        self.done_button = Button(btn_frame, text="Done", command=self.done, width=12, font=("Helvetica", 10))
         self.done_button.pack(side="left", padx=5, pady=5)
 
     def move_up(self):

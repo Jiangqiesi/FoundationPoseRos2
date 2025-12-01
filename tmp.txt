@@ -1,0 +1,5 @@
+
+[ERROR] [1764317382.757512812] [moveit_2055790293.moveit.planners.ompl.planner_manager]: ./src/ompl/geometric/planners/rrt/src/RRTConnect.cpp:265 - rm_robot_arm/rm_robot_arm: Unable to sample any valid states for goal tree
+[WARN] [1764317382.757563581] [moveit_2055790293.moveit.planners.ompl.model_based_planning_context]: Invalid goal state
+[ERROR] [1764317382.759193955] [moveit_2055790293.moveit.planners.ompl.model_based_planning_context]: Unable to solve the planning problem
+[ERROR] [1764317382.759273264] [moveit_py_node]: Planner 'OMPL' failed with error code GOAL_STATE_INVALID
