@@ -21,6 +21,8 @@ import argparse
 import time
 import sys
 import yaml
+import trimesh
+import trimesh.transformations as tra
 from realman.RealMan import RM_controller
 from Robotic_Arm.rm_robot_interface import rm_thread_mode_e
 
@@ -29,7 +31,9 @@ class FoundationPoseMoveIt2Controller(Node):
                  offset_z=0.16, enable_grasp=True, lift_height=0.2,
                  approach_distance=0.15, use_moveit=True,
                  grasp_file="demo_data/ship/ship3_grasp",
-                 pre_grasp_offset=0.10):
+                 grasp_files=None,
+                 pre_grasp_offset=0.10, place_pose=None,
+                 place_approach_offset=0.08, home_pose=None):
         super().__init__('foundationpose_moveit2_controller')
 
         self.object_ids = object_ids
@@ -43,9 +47,32 @@ class FoundationPoseMoveIt2Controller(Node):
         self.latest_poses = {}
         self.subscribers = {}
         self.arm = None
-        self.grasp_file = Path(grasp_file)
-        self.grasp_library = self.load_grasp_file(self.grasp_file)
+        self.default_grasp_file = Path(grasp_file) if grasp_file else None
+        self.default_grasp_library = self.load_grasp_file(self.default_grasp_file) if self.default_grasp_file else []
+        # 与旧代码兼容，保留默认抓取库引用
+        self.grasp_library = self.default_grasp_library
+        self.object_grasp_files = {}
+        self.object_grasp_libraries = {}
+        self._warned_default_grasp = set()
+        self._warned_missing_grasp = set()
+        if grasp_files:
+            for obj_id_raw, path in grasp_files.items():
+                try:
+                    obj_id = int(obj_id_raw)
+                except ValueError:
+                    self.get_logger().warn(f'抓取库配置的物体ID非法: {obj_id_raw}')
+                    continue
+                if obj_id not in self.object_ids:
+                    self.get_logger().warn(f'抓取库配置的物体 {obj_id} 不在订阅列表 {self.object_ids}')
+                file_path = Path(path)
+                lib = self.load_grasp_file(file_path)
+                self.object_grasp_files[obj_id] = file_path
+                self.object_grasp_libraries[obj_id] = lib
+                self.get_logger().info(f'物体 {obj_id} 使用专用抓取库: {file_path}')
         self.pre_grasp_offset = pre_grasp_offset
+        self.place_pose = place_pose
+        self.place_approach_offset = place_approach_offset
+        self.home_pose = home_pose
         # # test不使用抓取库时，改为空列表
         # self.grasp_library = []
         
@@ -205,6 +232,11 @@ class FoundationPoseMoveIt2Controller(Node):
             return ""
 
     def load_grasp_file(self, grasp_path: Path):
+        if grasp_path is None:
+            self.get_logger().warn('未提供抓取姿态文件路径')
+            return []
+        if not isinstance(grasp_path, Path):
+            grasp_path = Path(grasp_path)
         resolved_path = grasp_path if grasp_path.is_absolute() else Path(__file__).resolve().parent / grasp_path
         if not resolved_path.exists():
             self.get_logger().warn(f'抓取姿态文件不存在: {resolved_path}')
@@ -215,10 +247,40 @@ class FoundationPoseMoveIt2Controller(Node):
         except Exception as e:
             self.get_logger().error(f'读取抓取姿态失败: {e}')
             return []
+        
+        # 加载 raw 文件用于筛选
+        grasp_path_raw = str(grasp_path) + "_raw.yml" if not str(grasp_path).endswith('.yml') else str(grasp_path).replace(".yml", "_raw.yml")
+        resolved_path_raw = Path(grasp_path_raw) if Path(grasp_path_raw).is_absolute() else Path(__file__).resolve().parent / grasp_path_raw
+        
+        data_raw = {}
+        if resolved_path_raw.exists():
+            try:
+                with resolved_path_raw.open('r') as f:
+                    data_raw = yaml.safe_load(f) or {}
+            except Exception as e:
+                self.get_logger().error(f'读取抓取姿态(raw)失败: {e}')
+        
+        # 根据 raw 数据筛选出需要剔除的抓取名称
+        excluded_grasps = set()
+        raw_grasps = data_raw.get('grasps') or {}
+        for name, entry in raw_grasps.items():
+            pos = entry.get('position') or []
+            if len(pos) >= 3:
+                # 若 raw 中 z轴 < 0.02m，则剔除对应的抓取
+                if pos[2] < 0.02 - 0.5:
+                    excluded_grasps.add(name)
+                    self.get_logger().info(f'根据 raw 数据筛选剔除抓取: {name} (y={pos[1]:.4f}, z={pos[2]:.4f})')
 
         grasps = []
         for name, entry in (data.get('grasps') or {}).items():
+            # 如果该抓取在排除列表中，跳过
+            if name in excluded_grasps:
+                continue
+                
             pos = entry.get('position') or []
+            # # 位置偏移：x轴-0.035m, y轴偏移-0.02m, z轴
+            # pos = [pos[0] - 0.030, pos[1] - 0.02, pos[2]]
+
             orient = entry.get('orientation') or {}
             xyz = orient.get('xyz') or []
             w = orient.get('w', None)
@@ -234,8 +296,32 @@ class FoundationPoseMoveIt2Controller(Node):
             })
 
         grasps.sort(key=lambda g: g["confidence"], reverse=True)
-        self.get_logger().info(f'已从 {resolved_path} 载入 {len(grasps)} 个抓取候选')
+        self.get_logger().info(f'已从 {resolved_path} 载入 {len(grasps)} 个抓取候选 (筛除 {len(excluded_grasps)} 个)')
         return grasps
+
+    def get_grasp_library_for_object(self, object_id):
+        if object_id in self.object_grasp_libraries:
+            lib = self.object_grasp_libraries[object_id]
+            if not lib and object_id not in self._warned_missing_grasp:
+                self.get_logger().warn(
+                    f'物体 {object_id} 的抓取库为空: {self.object_grasp_files.get(object_id)}'
+                )
+                self._warned_missing_grasp.add(object_id)
+            return lib
+
+        if self.default_grasp_library:
+            if object_id not in self._warned_default_grasp:
+                self.get_logger().info(
+                    f'物体 {object_id} 未配置专用抓取库，使用默认 {self.default_grasp_file}'
+                )
+                self._warned_default_grasp.add(object_id)
+        else:
+            if object_id not in self._warned_missing_grasp:
+                self.get_logger().warn(
+                    f'物体 {object_id} 未配置抓取库且未提供默认抓取库'
+                )
+                self._warned_missing_grasp.add(object_id)
+        return self.default_grasp_library
 
     def pose_callback(self, msg, object_id):
         self.latest_poses[object_id] = msg
@@ -267,7 +353,6 @@ class FoundationPoseMoveIt2Controller(Node):
 
         # # 使用 RobotState + enforce_bounds() 做模型归一化
         # joints_rad = self._normalize_with_model(joint_names, joints_rad)
-
         # 发布 joint_states（注意：ROS 的惯例是“弧度”）
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
@@ -290,26 +375,27 @@ class FoundationPoseMoveIt2Controller(Node):
         if not ok:
             self.get_logger().warn('set_start_state() 返回 False，请检查关节名/范围/组名是否匹配')
 
-    def convert_pose_to_realman_format(self, pose_msg, z_offset=0.0):
+    def convert_pose_to_realman_format(self, pose_msg, z_offset=0.05):
         x = pose_msg.pose.position.x
         y = pose_msg.pose.position.y
         z = pose_msg.pose.position.z + self.offset_z + z_offset
 
         orientation = pose_msg.pose.orientation
         # # test
-        # quat_xyzw = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
-        quat_xyzw = np.array([orientation.x, orientation.y, orientation.z, orientation.w], dtype=np.float64)
+        quat_xyzw = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float64)
+        # quat_xyzw = np.array([orientation.x, orientation.y, orientation.z, orientation.w], dtype=np.float64)
         print(f"收到物体位姿: x={x:.4f}, y={y:.4f}, z={z:.4f}, "
               f"quat_xyzw={quat_xyzw}")
 
         rotation = R.from_quat(quat_xyzw)
+        euler_rpy = rotation.as_euler('xyz', degrees=False)
         # z_axis_rotation = R.from_euler('z', np.pi / 2.0, degrees=False)  # 90° intrinsic rotation
         # rotated_rotation = rotation * z_axis_rotation  # apply around object-local z axis
         # euler_rpy = rotated_rotation.as_euler('xyz', degrees=False)
 
-        x_axis_rotation = R.from_euler('x', math.pi / 2.0, degrees=False)
-        rotated_rotation = rotation * x_axis_rotation
-        euler_rpy = rotated_rotation.as_euler('xyz', degrees=False)
+        # x_axis_rotation = R.from_euler('x', math.pi / 2.0, degrees=False)
+        # rotated_rotation = rotation * x_axis_rotation
+        # euler_rpy = rotated_rotation.as_euler('xyz', degrees=False)
 
         print(
             f"真实目标位姿: x={x:.4f}, y={y:.4f}, z={z:.4f}, "
@@ -339,13 +425,17 @@ class FoundationPoseMoveIt2Controller(Node):
         return final_pos, final_quat
 
     def compute_pre_grasp_position(self, obj_pos, grasp_pos_world, offset):
-        direction = grasp_pos_world - obj_pos
-        norm = np.linalg.norm(direction)
-        if norm < 1e-6:
-            direction = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-            norm = 1.0
-        unit_dir = direction / norm
-        return grasp_pos_world + unit_dir * float(offset)
+        # direction = grasp_pos_world - obj_pos
+        # norm = np.linalg.norm(direction)
+        # if norm < 1e-6:
+        #     direction = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        #     norm = 1.0
+        # unit_dir = direction / norm
+        # return grasp_pos_world + unit_dir * float(offset)
+        # 让z轴抬升即可
+        pre_grasp_pos = np.array(grasp_pos_world, dtype=np.float64)
+        pre_grasp_pos[2] += float(offset)
+        return pre_grasp_pos
 
     def create_pose_stamped(self, x, y, z, quat_xyzw):
         pose = PoseStamped()
@@ -360,8 +450,28 @@ class FoundationPoseMoveIt2Controller(Node):
         pose.pose.orientation.w = quat_xyzw[3]
         return pose
 
-    def generate_grasp_targets(self, pose_msg):
-        if not self.grasp_library:
+    def pose_list_to_pose_stamped(self, pose_list):
+        """将[x, y, z, rx, ry, rz]列表转换为PoseStamped"""
+        if pose_list is None or len(pose_list) != 6:
+            raise ValueError("期望长度为6的放置/回零位姿")
+        quat_xyzw = R.from_euler('xyz', pose_list[3:6], degrees=False).as_quat()
+        return self.create_pose_stamped(
+            float(pose_list[0]),
+            float(pose_list[1]),
+            float(pose_list[2]),
+            quat_xyzw,
+        )
+
+    def pose_stamped_to_realman_pose(self, pose_stamped: PoseStamped):
+        """将PoseStamped转换为RealMan SDK使用的[x, y, z, rx, ry, rz]格式"""
+        pos = pose_stamped.pose.position
+        orient = pose_stamped.pose.orientation
+        quat_xyzw = np.array([orient.x, orient.y, orient.z, orient.w], dtype=np.float64)
+        rpy = R.from_quat(quat_xyzw).as_euler('xyz', degrees=False)
+        return [pos.x, pos.y, pos.z, rpy[0], rpy[1], rpy[2]]
+
+    def generate_grasp_targets(self, pose_msg, grasp_library):
+        if not grasp_library:
             return []
 
         pos = pose_msg.pose.position
@@ -370,12 +480,18 @@ class FoundationPoseMoveIt2Controller(Node):
         obj_quat = np.array([orient.x, orient.y, orient.z, orient.w], dtype=np.float64)
 
         targets = []
-        for grasp in self.grasp_library:
+        for grasp in grasp_library:
+            # # 先对抓取位姿进行变换，绕x轴旋转56度
+            # base_rotation = R.from_quat(grasp["quat"])
+            # additional_rotation = R.from_euler('x', math.radians(56), degrees=False)
+            # combined_rotation = additional_rotation * base_rotation
+            # modified_grasp_quat = combined_rotation.as_quat()
+
             final_pos, final_quat = self.transform_grasp_pose(
                 obj_pos, obj_quat, grasp["position"], grasp["quat"]
             )
             pre_pos = self.compute_pre_grasp_position(obj_pos, final_pos, self.pre_grasp_offset)
-            final_pos = self.compute_pre_grasp_position(obj_pos, final_pos, 0.02)
+            # final_pos = self.compute_pre_grasp_position(obj_pos, final_pos, 0.03)
 
             target_pose = self.create_pose_stamped(
                 float(final_pos[0]),
@@ -475,14 +591,25 @@ class FoundationPoseMoveIt2Controller(Node):
         else:
             self.get_logger().warn('MoveIt2规划失败，回退到直接控制')
             return False
+    
+    def execute_pose_with_fallback(self, pose_stamped: PoseStamped, step_name: str = ""):
+        """优先使用MoveIt执行，失败则转换为SDK姿态直接发送"""
+        desc = f"({step_name})" if step_name else ""
+        if self.use_moveit:
+            if self.move_with_moveit(pose_stamped):
+                return True
+            self.get_logger().warn(f'MoveIt2执行{desc}失败，尝试SDK直控')
 
-    def try_moveit_grasp_candidates(self, pose_msg):
+        target_pose = self.pose_stamped_to_realman_pose(pose_stamped)
+        return self.move_with_sdk(target_pose)
+
+    def try_moveit_grasp_candidates(self, object_id, pose_msg, grasp_library):
         if not self.use_moveit:
             return False
 
-        candidates = self.generate_grasp_targets(pose_msg)
+        candidates = self.generate_grasp_targets(pose_msg, grasp_library)
         if not candidates:
-            self.get_logger().warn('未找到抓取候选位姿，跳过组合规划')
+            self.get_logger().warn(f'物体 {object_id} 未找到抓取候选位姿，跳过组合规划')
             return False
 
         total = len(candidates)
@@ -490,23 +617,76 @@ class FoundationPoseMoveIt2Controller(Node):
             meta = candidate["meta"]
             pre = candidate["pre_pose"].pose.position
             p = candidate["pose"].pose.position
+            # 对抓取候选进行筛选，若z轴过低则跳过
+            if p.z < 0.04:
+                self.get_logger().info(
+                    f'跳过抓取候选 {meta["name"]}，z轴过低 (z={p.z:.3f}m)'
+                )
+                continue
+            
             self.get_logger().info(
                 f'尝试抓取候选 {idx}/{total} ({meta["name"]}, conf={meta["confidence"]:.3f})\n'
                 f'  预抓取: ({pre.x:.3f}, {pre.y:.3f}, {pre.z:.3f}) -> 目标: ({p.x:.3f}, {p.y:.3f}, {p.z:.3f})'
             )
 
-            pre_plan = self.plan_to_pose(candidate["pre_pose"])
-            if pre_plan and self.execute_plan(pre_plan):
-                grasp_plan = self.plan_to_pose(candidate["pose"])
-                if grasp_plan and self.execute_plan(grasp_plan):
-                    self.get_logger().info(f'已成功执行抓取候选 {meta["name"]}')
-                    return True
-                # return True
+            if self.execute_grasp_candidate(candidate):
+                self.get_logger().info(f'候选 {meta["name"]} 抓取完成')
+                return True
 
-            self.get_logger().warn(f'候选 {meta["name"]} 预抓取或抓取规划/执行失败，尝试下一个')
+            self.get_logger().warn(f'候选 {meta["name"]} 抓取失败，尝试下一个')
 
-        self.get_logger().error('所有抓取候选规划均失败')
+        self.get_logger().error('所有抓取候选抓取均失败')
         return False
+
+    def execute_grasp_candidate(self, candidate):
+        """使用生成的抓取位姿直接完成 预抓取-抓取-提升 流程，避免重复生成目标"""
+        meta = candidate.get("meta", {})
+        pre_pose = candidate["pre_pose"]
+        grasp_pose = candidate["pose"]
+
+        self.get_logger().info(f'使用抓取候选 {meta.get("name", "unknown")} 执行抓取序列')
+        # 确保夹爪张开
+        self.rm_controller.set_gripper(1.0)
+        time.sleep(0.5)
+
+        # 1. 预抓取
+        if not self.execute_pose_with_fallback(pre_pose, "预抓取"):
+            return False
+
+        # 2. 移动到抓取姿态
+        if not self.execute_pose_with_fallback(grasp_pose, "抓取位姿"):
+            return False
+
+        # 3. 闭合夹爪
+        current_gripper_pos = self.rm_controller.get_gripper()
+        print(f'抓取前夹爪位置: {current_gripper_pos:.3f}')
+        self.rm_controller.set_gripper(-1.0) # 假设0.1表示张开10%
+        time.sleep(2.0)
+        new_gripper_pos = self.rm_controller.get_gripper()
+        print(f'抓取后夹爪位置: {new_gripper_pos:.3f}')
+
+        if abs(new_gripper_pos - current_gripper_pos) <= 0.05:
+            self.get_logger().warn('抓取失败，夹爪位置变化不明显')
+            self.release_object()
+            self.execute_pose_with_fallback(lift_pose, "提升")
+            return False
+
+        # 4. 提升物体，保持同一姿态
+        gpos = grasp_pose.pose.position
+        gquat = grasp_pose.pose.orientation
+        lift_pose = self.create_pose_stamped(
+            float(gpos.x),
+            float(gpos.y),
+            float(gpos.z + self.lift_height),
+            [gquat.x, gquat.y, gquat.z, gquat.w],
+        )
+
+        if not self.execute_pose_with_fallback(lift_pose, "提升"):
+            self.release_object()
+            return False
+
+        time.sleep(2.0)
+        return True
 
     def move_with_sdk(self, target_pose):
         self.get_logger().info(f'使用SDK直接移动到: {target_pose}')
@@ -539,16 +719,7 @@ class FoundationPoseMoveIt2Controller(Node):
             self.get_logger().info(f'第1步: 移动到接近点 (z={approach_z:.3f}m)')
             approach_pose_stamped = self.create_pose_stamped(x, y, approach_z, quat)
 
-            if self.use_moveit:
-                success = self.move_with_moveit(approach_pose_stamped)
-                if not success:
-                    approach_pose = [x, y, approach_z, 0, 1.57, 0]
-                    success = self.move_with_sdk(approach_pose)
-            else:
-                approach_pose = [x, y, approach_z, 0, 1.57, 0]
-                success = self.move_with_sdk(approach_pose)
-
-            if not success:
+            if not self.execute_pose_with_fallback(approach_pose_stamped, "接近"):
                 self.get_logger().error('接近阶段失败')
                 self.release_object()
                 return False
@@ -582,16 +753,7 @@ class FoundationPoseMoveIt2Controller(Node):
                 self.get_logger().info(f'第4步: 提升物体 (z={retreat_z:.3f}m)')
                 retreat_pose_stamped = self.create_pose_stamped(x, y, retreat_z, quat)
 
-                if self.use_moveit:
-                    success = self.move_with_moveit(retreat_pose_stamped)
-                    if not success:
-                        retreat_pose = [x, y, retreat_z, 0, 1.57, 0]
-                        success = self.move_with_sdk(retreat_pose)
-                else:
-                    retreat_pose = [x, y, retreat_z, 0, 1.57, 0]
-                    success = self.move_with_sdk(retreat_pose)
-
-                if success:
+                if self.execute_pose_with_fallback(retreat_pose_stamped, "提升"):
                     self.get_logger().info(f'成功完成物体 {object_id} 的抓取和提升')
                     time.sleep(5.0)
                     return True
@@ -617,6 +779,67 @@ class FoundationPoseMoveIt2Controller(Node):
         except Exception as e:
             self.get_logger().error(f'释放物体时出错: {e}')
 
+    def place_sequence(self):
+        if self.place_pose is None:
+            self.get_logger().info('未配置放置位姿，跳过放置动作')
+            return True
+
+        if len(self.place_pose) != 6:
+            self.get_logger().error('放置位姿需提供6个元素 [x y z rx ry rz]')
+            return False
+
+        try:
+            target = list(self.place_pose)
+            rpy = target[3:6]
+            pre_target = [
+                target[0],
+                target[1],
+                target[2] + float(self.place_approach_offset),
+                rpy[0],
+                rpy[1],
+                rpy[2],
+            ]
+
+            pre_pose_stamped = self.pose_list_to_pose_stamped(pre_target)
+            place_pose_stamped = self.pose_list_to_pose_stamped(target)
+
+            if not self.execute_pose_with_fallback(pre_pose_stamped, "放置-上方"):
+                return False
+
+            if not self.execute_pose_with_fallback(place_pose_stamped, "放置-下降"):
+                return False
+
+            self.release_object()
+            time.sleep(0.5)
+
+            # 放置完成后抬回上方，提高与其他动作切换的安全性
+            self.execute_pose_with_fallback(pre_pose_stamped, "放置-抬升")
+            return True
+        except Exception as e:
+            self.get_logger().error(f'放置任务出错: {e}')
+            return False
+
+    def move_to_home_pose(self):
+        if self.home_pose is None:
+            return True
+
+        if len(self.home_pose) != 6:
+            self.get_logger().error('初始位姿需提供6个元素 [x y z rx ry rz]')
+            return False
+
+        try:
+            home_pose_stamped = self.pose_list_to_pose_stamped(self.home_pose)
+            target_pose = self.pose_stamped_to_realman_pose(home_pose_stamped)
+            return self.move_with_sdk(target_pose)
+        except Exception as e:
+            self.get_logger().error(f'回初始位姿失败: {e}')
+            return False
+
+    def post_grasp_actions(self):
+        if not self.place_sequence():
+            return False
+        return self.move_to_home_pose()
+
     def get_gripper_status(self):
         try:
             pos = self.rm_controller.get_gripper()
@@ -633,16 +856,20 @@ class FoundationPoseMoveIt2Controller(Node):
         try:
             pose_msg = self.latest_poses[object_id]
 
-            if self.use_moveit and self.grasp_library:
-                grasp_success = self.try_moveit_grasp_candidates(pose_msg)
+            grasp_library = self.get_grasp_library_for_object(object_id)
+
+            if self.use_moveit and grasp_library:
+                grasp_success = self.try_moveit_grasp_candidates(object_id, pose_msg, grasp_library)
                 if grasp_success:
-                    return True
+                    return self.post_grasp_actions()
                 else:
                     self.get_logger().warn('组合抓取规划失败，回退到原有流程')
 
             if self.enable_grasp:
                 # TODO: fix with condition of grasp pose 
-                return self.grasp_and_lift_sequence(object_id, pose_msg)
+                if self.grasp_and_lift_sequence(object_id, pose_msg):
+                    return self.post_grasp_actions()
+                return False
             else:
                 target_pose = self.convert_pose_to_realman_format(pose_msg)
 
@@ -783,18 +1010,39 @@ def main():
                        help='Z方向偏移量 (默认: 0.16m)')
     parser.add_argument('--disable-grasp', action='store_true',
                        help='禁用抓取功能')
-    parser.add_argument('--lift-height', type=float, default=0.2,
-                       help='抓取后提升高度 (默认: 0.2m)')
+    parser.add_argument('--lift-height', type=float, default=0.1,
+                       help='抓取后提升高度 (默认: 0.1m)')
     parser.add_argument('--approach-distance', type=float, default=0.1,
                        help='接近距离 (默认: 0.1m)')
-    parser.add_argument('--grasp-file', type=str, default='demo_data/ship/ship3_grasp',
-                       help='抓取姿态文件 (默认: demo_data/ship/ship3_grasp)')
-    parser.add_argument('--pre-grasp-offset', type=float, default=0.10,
-                       help='预抓取点相对抓取点沿物体方向外移距离 (默认: 0.10m)')
+    parser.add_argument('--grasp-file', type=str, default='demo_data/ship_data/test_grasp_q2',
+                       help='抓取姿态文件 (默认: demo_data/ship_data/test_grasp_q2)')
+    parser.add_argument('--grasp-files', nargs='*', default=[],
+                       help='为特定物体指定抓取姿态文件，格式 <obj_id>:<path>，例如 1:demo_data/a.yml 2:demo_data/b.yml')
+    parser.add_argument('--pre-grasp-offset', type=float, default=0.05,
+                       help='预抓取点相对抓取点沿物体方向外移距离 (默认: 0.05m)')
+    parser.add_argument('--place-pose', nargs=6, type=float,
+                       help='放置点6D位姿 [x y z rx ry rz] (单位: m/rad)')
+    parser.add_argument('--place-approach-offset', type=float, default=0.08,
+                       help='放置前相对目标的上方偏移高度 (默认: 0.08m)')
+    parser.add_argument('--home-pose', nargs=6, type=float,
+                       help='放置完成后回到的初始位姿 [x y z rx ry rz] (单位: m/rad)')
     parser.add_argument('--no-moveit', action='store_true',
                        help='禁用MoveIt2，使用SDK直接控制')
 
     args = parser.parse_args()
+
+    grasp_file_map = {}
+    for item in args.grasp_files or []:
+        if ':' not in item:
+            print(f"跳过无效的 --grasp-files 参数: {item}，格式应为 <obj_id>:<path>")
+            continue
+        obj_str, path = item.split(':', 1)
+        try:
+            obj_id = int(obj_str)
+        except ValueError:
+            print(f"跳过无效的物体ID: {obj_str}")
+            continue
+        grasp_file_map[obj_id] = path
 
     rclpy.init()
 
@@ -810,7 +1058,11 @@ def main():
             approach_distance=args.approach_distance,
             use_moveit=not args.no_moveit,
             grasp_file=args.grasp_file,
-            pre_grasp_offset=args.pre_grasp_offset
+            grasp_files=grasp_file_map,
+            pre_grasp_offset=args.pre_grasp_offset,
+            place_pose=args.place_pose,
+            place_approach_offset=args.place_approach_offset,
+            home_pose=args.home_pose
         )
 
         print(f"开始监听物体 {args.objects} 的位姿信息...")

@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import trimesh
 from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import Pose, PoseStamped
+from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from cv_bridge import CvBridge
 import argparse
 import os
@@ -20,10 +20,13 @@ import os
 import tkinter as tk
 from tkinter import Listbox, END, Button
 import glob
+import yaml
 
 # Save the original `__init__` and `register` methods
 original_init = FoundationPose.__init__
 original_register = FoundationPose.register
+
+    
 
 # Modify `__init__` to add `is_register` attribute
 def modified_init(self, model_pts, model_normals, symmetry_tfs=None, mesh=None, scorer=None, refiner=None, glctx=None, debug=0, debug_dir='./FoundationPose'):
@@ -135,11 +138,69 @@ def rearrange_files(file_paths):
     root.mainloop()  # Start the GUI event loop
     return app.get_reordered_paths()  # Return the reordered paths after GUI closes
 
+
+def load_grasp_library(grasp_path):
+    """
+    读取 GraspGen 抓取库文件，返回列表：
+    {"name": str, "confidence": float, "position": np.array(3,), "quat": np.array(4, xyzw)}
+    """
+    resolved = grasp_path if os.path.isabs(grasp_path) else os.path.join(code_dir, grasp_path)
+    if not os.path.exists(resolved):
+        print(f"[grasp] 抓取库文件不存在: {resolved}")
+        return []
+
+    try:
+        with open(resolved, 'r') as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as exc:
+        print(f"[grasp] 读取抓取库失败: {exc}")
+        return []
+
+    grasps = []
+    for name, entry in (data.get('grasps') or {}).items():
+        pos = entry.get('position') or []
+        orient = entry.get('orientation') or {}
+        xyz = orient.get('xyz') or []
+        w = orient.get('w', None)
+        if len(pos) != 3 or len(xyz) != 3 or w is None:
+            continue
+        quat_xyzw = np.array([xyz[0], xyz[1], xyz[2], w], dtype=np.float64)
+        grasps.append({
+            "name": name,
+            "confidence": float(entry.get('confidence', 0.0)),
+            "position": np.array(pos, dtype=np.float64),
+            "quat": quat_xyzw,
+        })
+
+    grasps.sort(key=lambda g: g["confidence"], reverse=True)
+    print(f"[grasp] 已载入 {len(grasps)} 个抓取候选，文件: {resolved}")
+    return grasps
+
+
+def base_pose_list_to_mat(base_pose):
+    """
+    foundationpose_ros_multi 发布的 base 下姿态是 [x, y, z, w, x, y, z] (wxyz)。
+    转换为 4x4 齐次矩阵 ^bT_o。
+    """
+    if len(base_pose) != 7:
+        raise ValueError("base_pose 长度应为7: [x, y, z, w, x, y, z]")
+    pos = np.array(base_pose[:3], dtype=np.float64)
+    quat_wxyz = np.array(base_pose[3:], dtype=np.float64)
+    quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=np.float64)
+    T = np.eye(4)
+    T[:3, :3] = R.from_quat(quat_xyzw).as_matrix()
+    T[:3, 3] = pos
+    return T
+
 # Argument Parser
 parser = argparse.ArgumentParser()
 code_dir = os.path.dirname(os.path.realpath(__file__))
 parser.add_argument('--est_refine_iter', type=int, default=4)
 parser.add_argument('--track_refine_iter', type=int, default=2)
+parser.add_argument('--grasp_file', type=str, default='demo_data/ship_data/test2_grasp1',
+                    help='GraspGen抓取库文件 (object坐标系下的^oT_g)')
+parser.add_argument('--base_frame', type=str, default='base_link',
+                    help='发布抓取/物体位姿使用的基坐标系名称')
 args = parser.parse_args()
 
 class PoseEstimationNode(Node):
@@ -159,16 +220,22 @@ class PoseEstimationNode(Node):
         # Load meshes
         self.mesh_files = new_file_paths
         # unit: meter
-        # other obj
-        model_scale = 0.001 # 1mm = 0.001m
+        model_scale = 1
+        # # other obj
+        # model_scale = 0.001 # 1mm = 0.001m
         # # tray
         # model_scale = 0.05
         self.meshes = [trimesh.load(mesh) for mesh in self.mesh_files]
         for mesh in self.meshes:
             mesh.apply_scale(model_scale)
+                
+        # [修改] 不再计算定向包围盒(OBB)和中心偏移
+        # self.bounds = [trimesh.bounds.oriented_bounds(mesh) for mesh in self.meshes]
+        # self.bboxes = [np.stack([-extents/2, extents/2], axis=0).reshape(2, 3) for _, extents in self.bounds]
         
-        self.bounds = [trimesh.bounds.oriented_bounds(mesh) for mesh in self.meshes]
-        self.bboxes = [np.stack([-extents/2, extents/2], axis=0).reshape(2, 3) for _, extents in self.bounds]
+        # [新增] 直接使用相对于原始原点的轴对齐包围盒 (AABB)
+        # mesh.bounds 返回 [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+        self.bboxes = [mesh.bounds for mesh in self.meshes]
         
         self.scorer = ScorePredictor()
         self.refiner = PoseRefinePredictor()
@@ -179,8 +246,82 @@ class PoseEstimationNode(Node):
 
         self.pose_estimations = {}  # Dictionary to track multiple pose estimations
         self.pose_publishers = {}  # Dictionary to store publishers for each object
+        self.grasp_array_publishers = {}
+        self.best_grasp_publishers = {}
         self.tracked_objects = []  # Initialize to store selected objects' masks
         self.i = 0
+        self.base_frame_id = args.base_frame
+        self.grasp_library = load_grasp_library(args.grasp_file)
+
+    def compute_grasp_candidates_in_base(self, base_pose_list):
+        if not self.grasp_library:
+            return []
+        try:
+            T_base_obj = base_pose_list_to_mat(base_pose_list)
+        except Exception as exc:
+            self.get_logger().warn(f"抓取转换失败，忽略本次: {exc}")
+            return []
+
+        candidates = []
+        for grasp in self.grasp_library:
+            T_obj_grasp = np.eye(4)
+            T_obj_grasp[:3, :3] = R.from_quat(grasp["quat"]).as_matrix()
+            T_obj_grasp[:3, 3] = grasp["position"]
+            T_base_grasp = T_base_obj @ T_obj_grasp
+            quat_xyzw = R.from_matrix(T_base_grasp[:3, :3]).as_quat()
+            candidates.append({
+                "name": grasp["name"],
+                "confidence": grasp["confidence"],
+                "position": T_base_grasp[:3, 3],
+                "quat": quat_xyzw,
+            })
+        return candidates
+
+    def publish_grasp_candidates(self, candidates, obj_idx):
+        if not candidates:
+            return
+        topic_array = f"/GraspGen_candidates_{obj_idx}"
+        if topic_array not in self.grasp_array_publishers:
+            self.grasp_array_publishers[topic_array] = self.create_publisher(PoseArray, topic_array, 10)
+
+        array_msg = PoseArray()
+        array_msg.header.frame_id = self.base_frame_id
+        array_msg.header.stamp = self.get_clock().now().to_msg()
+
+        for c in candidates:
+            pose = Pose()
+            pose.position.x = float(c["position"][0])
+            pose.position.y = float(c["position"][1])
+            pose.position.z = float(c["position"][2])
+            pose.orientation.x = float(c["quat"][0])
+            pose.orientation.y = float(c["quat"][1])
+            pose.orientation.z = float(c["quat"][2])
+            pose.orientation.w = float(c["quat"][3])
+            array_msg.poses.append(pose)
+
+        self.grasp_array_publishers[topic_array].publish(array_msg)
+
+        best = max(candidates, key=lambda c: c["confidence"])
+        best_topic = f"/Best_GraspGen_pose_{obj_idx}"
+        if best_topic not in self.best_grasp_publishers:
+            self.best_grasp_publishers[best_topic] = self.create_publisher(PoseStamped, best_topic, 10)
+
+        best_msg = PoseStamped()
+        best_msg.header.frame_id = self.base_frame_id
+        best_msg.header.stamp = self.get_clock().now().to_msg()
+        best_msg.pose.position.x = float(best["position"][0])
+        best_msg.pose.position.y = float(best["position"][1])
+        best_msg.pose.position.z = float(best["position"][2])
+        best_msg.pose.orientation.x = float(best["quat"][0])
+        best_msg.pose.orientation.y = float(best["quat"][1])
+        best_msg.pose.orientation.z = float(best["quat"][2])
+        best_msg.pose.orientation.w = float(best["quat"][3])
+        self.best_grasp_publishers[best_topic].publish(best_msg)
+
+        self.get_logger().info(
+            f"GraspGen最佳抓取 (obj {obj_idx}): {best['name']} conf={best['confidence']:.3f} "
+            f"pos=({best_msg.pose.position.x:.3f}, {best_msg.pose.position.y:.3f}, {best_msg.pose.position.z:.3f})"
+        )
 
     def camera_info_callback(self, msg):
         if self.cam_K is None:  # Update cam_K only once to avoid redundant updates
@@ -259,7 +400,8 @@ class PoseEstimationNode(Node):
 
                             # Temporarily store the mesh and bounds to avoid permanent removal
                             temp_mesh = self.meshes.pop(0)  # Remove the first mesh in line
-                            temp_to_origin, _ = self.bounds.pop(0)  # Remove the first bound in line
+                            # [修改] 不再弹出 bounds，因为我们不再维护 self.bounds 列表
+                            # temp_to_origin, _ = self.bounds.pop(0)  # Remove the first bound in line
 
                             # Initialize FoundationPose for each detected object with corresponding mesh
                             pose_est = FoundationPose(
@@ -274,7 +416,7 @@ class PoseEstimationNode(Node):
                             temporary_pose_estimations[sequential_id] = {
                                 'pose_est': pose_est,
                                 'mask': selected_obj['mask'],
-                                'to_origin': temp_to_origin
+                                # 'to_origin': temp_to_origin # [修改] 不再存储偏移矩阵
                             }
 
                             # Refresh the dialog box with the updated object name
@@ -325,7 +467,7 @@ class PoseEstimationNode(Node):
 
                         # Remove the first mesh and bounds in line
                         self.meshes.pop(0)
-                        self.bounds.pop(0)
+                        # self.bounds.pop(0) # [修改] 不再弹出 bounds
 
                         refresh_dialog_box()
                     elif key in [ord('q'), 27]:  # 'q' or Esc to quit
@@ -339,7 +481,7 @@ class PoseEstimationNode(Node):
                             # Remove the corresponding meshes and bounds from the original lists only after confirmation
                             selected_indices = sorted(temporary_pose_estimations.keys(), reverse=True)
                             self.meshes = [self.meshes[idx] for idx in selected_indices]
-                            self.bounds = [self.bounds[idx] for idx in selected_indices]
+                            # self.bounds = [self.bounds[idx] for idx in selected_indices] # [修改] 移除
 
                             masks_accepted = True  # Exit the outer loop if masks are accepted
                             break
@@ -351,12 +493,14 @@ class PoseEstimationNode(Node):
         for idx, data in self.pose_estimations.items():
             pose_est = data['pose_est']
             obj_mask = data['mask']
-            to_origin = data['to_origin']
+            # to_origin = data['to_origin'] # [修改] 移除
             if pose_est.is_register:
                 pose = pose_est.track_one(rgb=color, depth=depth, K=self.cam_K, iteration=args.track_refine_iter)
-                center_pose = pose @ np.linalg.inv(to_origin)
+                # [修改] 直接使用原始 pose，不需要乘以 inv(to_origin)
+                # center_pose = pose @ np.linalg.inv(to_origin)
+                center_pose = pose
 
-                self.publish_pose_stamped(center_pose, f"object_{idx}_frame", f"/Current_OBJ_position_{idx+1}")
+                self.publish_pose_stamped(center_pose, f"object_{idx}_frame", f"/Current_OBJ_position_{idx+1}", idx + 1)
 
                 visualization_image = self.visualize_pose(visualization_image, center_pose, idx)
             else:
@@ -372,7 +516,7 @@ class PoseEstimationNode(Node):
         vis = draw_xyz_axis(vis, ob_in_cam=center_pose, scale=0.1, K=self.cam_K, thickness=3, transparency=0, is_input_rgb=True)
         return vis
 
-    def publish_pose_stamped(self, center_pose, frame_id, topic_name):
+    def publish_pose_stamped(self, center_pose, frame_id, topic_name, obj_idx):
         if topic_name not in self.pose_publishers:
             self.pose_publishers[topic_name] = self.create_publisher(PoseStamped, topic_name, 10)
         
@@ -406,6 +550,8 @@ class PoseEstimationNode(Node):
 
         # Publish the transformed pose
         self.pose_publishers[topic_name].publish(pose_stamped_msg)
+        # grasp_candidates = self.compute_grasp_candidates_in_base(transformed_pose)
+        # self.publish_grasp_candidates(grasp_candidates, obj_idx)
 
 def main(args=None):
     source_directory = "demo_data"

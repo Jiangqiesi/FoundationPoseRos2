@@ -26,7 +26,7 @@ class PoseTestNode(Node):
             self.get_logger().info(f'订阅物体 {obj_id} 的位姿话题: {topic_name}')
         
         # 创建定时器，定期显示所有物体位姿
-        self.timer = self.create_timer(1.0, self.display_poses)
+        self.timer = self.create_timer(5.0, self.display_poses)
 
     def pose_callback(self, msg, object_id):
         # 存储最新位姿

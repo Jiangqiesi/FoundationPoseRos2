@@ -214,7 +214,7 @@ if __name__ == "__main__":
     # --- 测试代码 ---
     try:
         # 初始化控制器
-        rm_controller = RM_controller("192.168.0.18", rm_thread_mode_e.RM_TRIPLE_MODE_E)
+        rm_controller = RM_controller("192.168.0.17", rm_thread_mode_e.RM_TRIPLE_MODE_E)
         
         # 测试获取状态
         current_state = rm_controller.get_state()
@@ -225,19 +225,19 @@ if __name__ == "__main__":
         current_gripper = rm_controller.get_gripper()
         print(f"当前夹爪位置: {current_gripper}")
         print("\n测试设置夹爪...")
-        rm_controller.set_gripper(0.9) # 假设0.1表示张开10%
-        time.sleep(2)
+        rm_controller.set_gripper(-1.0) # 假设0.1表示张开10%
+        time.sleep(0.5)
         current_gripper = rm_controller.get_gripper()
         print(f"设置后夹爪位置: {current_gripper}")
 
-        # # 测试增量移动
-        # print("\n测试增量移动...")
-        # # 仅移动第一个关节，增加5度
-        # move_increment = [5, 0, 0, 0, 0, 0, 0]
-        # rm_controller.move(move_increment)
-        # time.sleep(3)
-        # new_state = rm_controller.get_state()
-        # print(f"移动后机械臂状态: {new_state}")
+        # 测试增量移动
+        print("\n测试增量移动...")
+        # 仅移动第一个关节，增加5度
+        move_increment = [5, 0, 0, 0, 0, 0, 0]
+        rm_controller.move(move_increment)
+        time.sleep(3)
+        new_state = rm_controller.get_state()
+        print(f"移动后机械臂状态: {new_state}")
 
     except ConnectionError as e:
         print(f"连接失败: {e}")

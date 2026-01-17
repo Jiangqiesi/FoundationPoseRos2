@@ -29,7 +29,13 @@ sleep 5
 
 echo "启动测试脚本..."
 cd ~/IML/FoundationPoseROS2
-python3 foundationpose_moveit2_controller.py "$@"
+python3 foundationpose_moveit2_controller.py \
+        --objects 1 2 \
+        --grasp-file demo_data/ship/ship3_test.yml \
+        --place-pose 0.031 -0.28 0.304 3.14 0 -1.57 \
+        --home-pose 0.30 -0.12 0.37 3.14 0 0 \
+        --place-approach-offset 0.08 "$@" \
+        --grasp-files 1:demo_data/cup/cup_test.yml 2:demo_data/ship/ship3_test.yml
 
 # 清理
 echo "正在关闭 Demo..."
