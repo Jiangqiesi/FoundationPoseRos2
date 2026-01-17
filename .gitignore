@@ -3,3 +3,15 @@ FoundationPose/
 rm_moveit_config/build/
 rm_moveit_config/install/
 rm_moveit_config/log/
+
+log/
+*.pyc
+__pycache__/
+*.swp
+.DS_Store
+.vscode/
+.claude/
+_misc/
+
+# Ignore pt files
+*.pt
