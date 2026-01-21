@@ -4,6 +4,8 @@ sys.path.append('./FoundationPose/nvdiffrast')
 
 import rclpy
 from rclpy.node import Node
+from rclpy.duration import Duration
+from rclpy.time import Time
 from estimater import *
 import cv2
 import numpy as np
@@ -16,10 +18,10 @@ import os
 from scipy.spatial.transform import Rotation as R
 from ultralytics import SAM
 from cam_2_base_transform import *
-import os
 import tkinter as tk
 from tkinter import Listbox, END, Button
 import glob
+import tf2_ros
 
 # Save the original `__init__` and `register` methods
 original_init = FoundationPose.__init__
@@ -33,7 +35,14 @@ def modified_init(self, model_pts, model_normals, symmetry_tfs=None, mesh=None, 
 # Modify `register` to set `is_register` to True when a pose is registered
 def modified_register(self, K, rgb, depth, ob_mask, iteration):
     pose = original_register(self, K, rgb, depth, ob_mask, iteration)
-    self.is_register = True  # Set to True after registration
+
+    ok = (
+        pose is not None
+        and isinstance(pose, np.ndarray)
+        and pose.shape == (4, 4)
+        and np.isfinite(pose).all()
+    )
+    self.is_register = bool(ok)
     return pose
 
 # Apply the modifications
@@ -117,16 +126,67 @@ parser = argparse.ArgumentParser()
 code_dir = os.path.dirname(os.path.realpath(__file__))
 parser.add_argument('--est_refine_iter', type=int, default=4)
 parser.add_argument('--track_refine_iter', type=int, default=2)
+parser.add_argument('--scale', type=float, default=1.0, help='Scale factor for the 3D models')
+parser.add_argument('--camera', type=str, default='d435', help='Camera namespace (e.g., d405, d435)')
+parser.add_argument('--color_topic', type=str, default=None, help='Override color image topic')
+parser.add_argument('--depth_topic', type=str, default=None, help='Override depth image topic')
+parser.add_argument('--info_topic', type=str, default=None, help='Override camera_info topic')
+parser.add_argument('--camera_frame', type=str, default=None, help='Override camera optical frame for TF')
+parser.add_argument('--base_frame', type=str, default='base_link', help='Base frame for output poses')
+parser.add_argument('--output_frame', type=str, default=None, help='Frame ID for published poses (defaults to base_frame)')
+parser.add_argument('--min_depth', type=float, default=None, help='Minimum valid depth in meters')
+parser.add_argument('--max_depth', type=float, default=None, help='Maximum valid depth in meters')
+parser.add_argument('--no_tf', action='store_true', help='Disable TF lookup and use static cam_2_base_transform')
 args = parser.parse_args()
 
+def resolve_camera_config(camera_name, color_topic, depth_topic, info_topic, camera_frame):
+    camera_name = camera_name.lstrip("/")
+    default_color = f"/{camera_name}/{camera_name}_color/image_raw"
+    default_depth = f"/{camera_name}/{camera_name}_depth/depth/image_raw"
+    default_info = f"/{camera_name}/{camera_name}_color/camera_info"
+    default_frame = f"{camera_name}_color_optical_frame"
+
+    return {
+        "color_topic": color_topic or default_color,
+        "depth_topic": depth_topic or default_depth,
+        "info_topic": info_topic or default_info,
+        "camera_frame": camera_frame or default_frame,
+    }
+
+def resolve_depth_range(camera_name, min_depth, max_depth):
+    if camera_name == "d405":
+        default_min = 0.02
+        default_max = 1.0
+    else:
+        default_min = 0.1
+        default_max = 10.0
+    return (
+        default_min if min_depth is None else min_depth,
+        default_max if max_depth is None else max_depth,
+    )
+
 class PoseEstimationNode(Node):
-    def __init__(self, new_file_paths):
+    def __init__(self, new_file_paths, camera_config, base_frame, output_frame, min_depth, max_depth, use_tf, scale):
         super().__init__('pose_estimation_node')
         
         # ROS subscriptions and publishers
-        self.image_sub = self.create_subscription(Image, '/camera/camera/color/image_raw', self.image_callback, 10)
-        self.depth_sub = self.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
-        self.info_sub = self.create_subscription(CameraInfo, '/camera/camera/color/camera_info', self.camera_info_callback, 10)
+        self.image_sub = self.create_subscription(Image, camera_config["color_topic"], self.image_callback, 10)
+        self.depth_sub = self.create_subscription(Image, camera_config["depth_topic"], self.depth_callback, 10)
+        self.info_sub = self.create_subscription(CameraInfo, camera_config["info_topic"], self.camera_info_callback, 10)
+
+        self.camera_frame = camera_config["camera_frame"]
+        self.base_frame = base_frame
+        self.output_frame = output_frame or base_frame
+        self.min_depth = min_depth
+        self.max_depth = max_depth
+        self.use_tf = use_tf
+        self._tf_warned = False
+
+        self._depth_warned = False
+
+        if self.use_tf:
+            self.tf_buffer = tf2_ros.Buffer(cache_time=Duration(seconds=10.0))
+            self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
         self.bridge = CvBridge()
         self.depth_image = None
@@ -136,10 +196,15 @@ class PoseEstimationNode(Node):
         # Load meshes
         self.mesh_files = new_file_paths
         self.meshes = [trimesh.load(mesh) for mesh in self.mesh_files]
+        for mesh in self.meshes:
+            mesh.apply_scale(scale)
         
-        self.bounds = [trimesh.bounds.oriented_bounds(mesh) for mesh in self.meshes]
-        self.bboxes = [np.stack([-extents/2, extents/2], axis=0).reshape(2, 3) for _, extents in self.bounds]
-        
+        # [修改] 直接使用相对于原始原点的轴对齐包围盒 (AABB)
+        # self.bounds = [trimesh.bounds.oriented_bounds(mesh) for mesh in self.meshes]
+        # self.bboxes = [np.stack([-extents/2, extents/2], axis=0).reshape(2, 3) for _, extents in self.bounds]
+        # mesh.bounds 返回 [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+        self.bboxes = [mesh.bounds for mesh in self.meshes]
+
         self.scorer = ScorePredictor()
         self.refiner = PoseRefinePredictor()
         self.glctx = dr.RasterizeCudaContext()
@@ -161,24 +226,85 @@ class PoseEstimationNode(Node):
         self.color_image = self.bridge.imgmsg_to_cv2(msg, "rgb8")
 
     def depth_callback(self, msg):
-        self.depth_image = self.bridge.imgmsg_to_cv2(msg, "32FC1") / 1e3
+        if msg.encoding.lower() in ("rgb8", "bgr8", "rgba8", "bgra8"):
+            self.get_logger().error(f"Depth topic is not depth! encoding={msg.encoding}. Please set --depth_topic to a real depth image (16UC1/32FC1).")
+            return
+        self.depth_image = self.decode_depth_image(msg)
         self.process_images()
+
+    def decode_depth_image(self, msg):
+        depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+
+        # 某些驱动/桥接会给出 (H, W, 1)，warp 内核需要 (H, W)
+        if isinstance(depth, np.ndarray) and depth.ndim == 3:
+            if depth.shape[-1] == 1:
+                depth = depth[..., 0]
+            else:
+                # 兜底：取第一个通道，至少保证 2D
+                depth = depth[..., 0]
+            if not self._depth_warned:
+                self.get_logger().warn(f"Depth image is 3D, squeezed to 2D. New shape={depth.shape}, msg.encoding={msg.encoding}")
+                self._depth_warned = True
+
+        # 深度单位统一成 meters(float32)
+        if msg.encoding in ("16UC1", "mono16"):
+            depth = depth.astype(np.float32) / 1000.0
+        else:
+            depth = depth.astype(np.float32)
+
+        return depth
+
+    def get_base_T_camera(self):
+        if not self.use_tf:
+            return None
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.base_frame,
+                self.camera_frame,
+                Time(),
+                timeout=Duration(seconds=0.2),
+            )
+        except tf2_ros.TransformException as exc:
+            if not self._tf_warned:
+                self.get_logger().warn(f"TF lookup failed ({self.base_frame} <- {self.camera_frame}): {exc}")
+                self._tf_warned = True
+            return None
+
+        t = transform.transform.translation
+        q = transform.transform.rotation
+        rot = R.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+        # # 测试：将旋转的rpy改为0 0.785398163 pi
+        # rot = R.from_euler('xyz', [0, 45, 180], degrees=True).as_matrix()
+        
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = rot
+        T[:3, 3] = [t.x, t.y, t.z]
+        # 输出rpy角度供调试
+        rpy = R.from_matrix(rot).as_euler('xyz', degrees=True)
+        print(f"TF lookup succeeded: {q}, rpy: {rpy}")
+        return T
 
     def process_images(self):
         if self.color_image is None or self.depth_image is None or self.cam_K is None:
             return
 
+        self.get_logger().info("process_images() entered")  # <-- 加这个
+
         H, W = self.color_image.shape[:2]
         color = cv2.resize(self.color_image, (W, H), interpolation=cv2.INTER_NEAREST)
         depth = cv2.resize(self.depth_image, (W, H), interpolation=cv2.INTER_NEAREST)
-        depth[(depth < 0.1) | (depth >= np.inf)] = 0
+        depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+        depth[(depth < self.min_depth) | (depth > self.max_depth)] = 0
 
         if self.i == 0:
+            self.get_logger().info("entering first-frame mask selection")  # <-- 加这个
             masks_accepted = False
 
             while not masks_accepted:
                 # Use SAM2 for segmentation
+                self.get_logger().info("running SAM2 predict...")  # <-- 加这个
                 res = self.seg_model.predict(color)[0]
+                self.get_logger().info("SAM2 predict done, opening window...")  # <-- 加这个
                 res.save("masks.png")
                 if not res:
                     self.get_logger().warn("No masks detected by SAM2.")
@@ -229,7 +355,8 @@ class PoseEstimationNode(Node):
 
                             # Temporarily store the mesh and bounds to avoid permanent removal
                             temp_mesh = self.meshes.pop(0)  # Remove the first mesh in line
-                            temp_to_origin, _ = self.bounds.pop(0)  # Remove the first bound in line
+                            # [修改] 不再弹出 bounds，因为我们不再维护 self.bounds 列表
+                            # temp_to_origin, _ = self.bounds.pop(0)  # Remove the first bound in line
 
                             # Initialize FoundationPose for each detected object with corresponding mesh
                             pose_est = FoundationPose(
@@ -244,7 +371,7 @@ class PoseEstimationNode(Node):
                             temporary_pose_estimations[sequential_id] = {
                                 'pose_est': pose_est,
                                 'mask': selected_obj['mask'],
-                                'to_origin': temp_to_origin
+                                # 'to_origin': temp_to_origin   # [修改] 不再维护偏移矩阵
                             }
 
                             # Refresh the dialog box with the updated object name
@@ -285,7 +412,9 @@ class PoseEstimationNode(Node):
                 refresh_dialog_box()
 
                 while True:
-                    key = cv2.waitKey(0)  # Wait for a key event
+                    self.get_logger().info("waiting key (cv2.waitKey(0)) ...")  # <-- 加这个
+                    key = cv2.waitKey(0)
+                    self.get_logger().info(f"got key={key}")  # <-- 加这个
                     if key == ord('r'):
                         self.get_logger().info("Redoing mask selection.")
                         break  # Break the inner loop to redo mask selection
@@ -295,7 +424,7 @@ class PoseEstimationNode(Node):
 
                         # Remove the first mesh and bounds in line
                         self.meshes.pop(0)
-                        self.bounds.pop(0)
+                        # self.bounds.pop(0)    # [修改] 不再维护 self.bounds 列表
 
                         refresh_dialog_box()
                     elif key in [ord('q'), 27]:  # 'q' or Esc to quit
@@ -309,7 +438,7 @@ class PoseEstimationNode(Node):
                             # Remove the corresponding meshes and bounds from the original lists only after confirmation
                             selected_indices = sorted(temporary_pose_estimations.keys(), reverse=True)
                             self.meshes = [self.meshes[idx] for idx in selected_indices]
-                            self.bounds = [self.bounds[idx] for idx in selected_indices]
+                            # self.bounds = [self.bounds[idx] for idx in selected_indices]  # [修改] 不再维护 self.bounds 列表
 
                             masks_accepted = True  # Exit the outer loop if masks are accepted
                             break
@@ -321,16 +450,19 @@ class PoseEstimationNode(Node):
         for idx, data in self.pose_estimations.items():
             pose_est = data['pose_est']
             obj_mask = data['mask']
-            to_origin = data['to_origin']
+            # to_origin = data['to_origin']  # [修改] 不再维护偏移矩阵
             if pose_est.is_register:
                 pose = pose_est.track_one(rgb=color, depth=depth, K=self.cam_K, iteration=args.track_refine_iter)
-                center_pose = pose @ np.linalg.inv(to_origin)
+                center_pose = pose # @ np.linalg.inv(to_origin) # [修改] 不再维护偏移矩阵
 
-                self.publish_pose_stamped(center_pose, f"object_{idx}_frame", f"/Current_OBJ_position_{idx+1}")
+                self.publish_pose_stamped(center_pose, f"/Current_OBJ_position_{idx+1}")
 
                 visualization_image = self.visualize_pose(visualization_image, center_pose, idx)
             else:
                 pose = pose_est.register(K=self.cam_K, rgb=color, depth=depth, ob_mask=obj_mask, iteration=args.est_refine_iter)
+                if not pose_est.is_register:
+                    self.get_logger().warn(f"Object {idx}: register failed, will retry next frame.")
+                    continue
             self.i += 1
 
         cv2.imshow('Pose Estimation & Tracking', visualization_image[..., ::-1])
@@ -342,40 +474,51 @@ class PoseEstimationNode(Node):
         vis = draw_xyz_axis(vis, ob_in_cam=center_pose, scale=0.1, K=self.cam_K, thickness=3, transparency=0, is_input_rgb=True)
         return vis
 
-    def publish_pose_stamped(self, center_pose, frame_id, topic_name):
+    def publish_pose_stamped(self, center_pose, topic_name):
         if topic_name not in self.pose_publishers:
             self.pose_publishers[topic_name] = self.create_publisher(PoseStamped, topic_name, 10)
         
         # Convert the center_pose matrix to a PoseStamped message
         pose_stamped_msg = PoseStamped()
         pose_stamped_msg.header.stamp = self.get_clock().now().to_msg()
-        pose_stamped_msg.header.frame_id = frame_id
+        pose_stamped_msg.header.frame_id = self.output_frame
 
-        # Convert center_pose to the pose format
-        position = center_pose[:3, 3]
-        rotation_matrix = center_pose[:3, :3]
-        quaternion = R.from_matrix(rotation_matrix).as_quat()
+        base_T_camera = self.get_base_T_camera()
+        if base_T_camera is not None:
+            base_T_object = base_T_camera @ center_pose
+            position = base_T_object[:3, 3]
+            quaternion = R.from_matrix(base_T_object[:3, :3]).as_quat()
 
-        # Combine position and quaternion into a single array
-        pose_array = np.concatenate((position, quaternion))
+            pose_stamped_msg.pose.position.x = position[0]
+            pose_stamped_msg.pose.position.y = position[1]
+            pose_stamped_msg.pose.position.z = position[2]
+            pose_stamped_msg.pose.orientation.x = quaternion[0]
+            pose_stamped_msg.pose.orientation.y = quaternion[1]
+            pose_stamped_msg.pose.orientation.z = quaternion[2]
+            pose_stamped_msg.pose.orientation.w = quaternion[3]
+            print(f"使用TF:object pose:{[position[i] for i in range(3)] + [quaternion[i] for i in range(4)]}")
+        else:
+            position = center_pose[:3, 3]
+            rotation_matrix = center_pose[:3, :3]
+            quaternion = R.from_matrix(rotation_matrix).as_quat()
+            pose_array = np.concatenate((position, quaternion))
+            transformed_pose = transformation(pose_array)
 
-        # Apply transformation to convert from camera to base frame
-        transformed_pose = transformation(pose_array)
+            pose_stamped_msg.pose.position.x = transformed_pose[0]
+            pose_stamped_msg.pose.position.y = transformed_pose[1]
+            pose_stamped_msg.pose.position.z = transformed_pose[2]
 
-        # Populate PoseStamped message with transformed pose
-        pose_stamped_msg.pose.position.x = transformed_pose[0]
-        pose_stamped_msg.pose.position.y = transformed_pose[1]
-        pose_stamped_msg.pose.position.z = transformed_pose[2]
-
-        pose_stamped_msg.pose.orientation.w = transformed_pose[3]
-        pose_stamped_msg.pose.orientation.x = transformed_pose[4]
-        pose_stamped_msg.pose.orientation.y = transformed_pose[5]
-        pose_stamped_msg.pose.orientation.z = transformed_pose[6]
+            pose_stamped_msg.pose.orientation.w = transformed_pose[3]
+            pose_stamped_msg.pose.orientation.x = transformed_pose[4]
+            pose_stamped_msg.pose.orientation.y = transformed_pose[5]
+            pose_stamped_msg.pose.orientation.z = transformed_pose[6]
+            print(f"不使用TF:object pose:{[transformed_pose[i] for i in range(7)]}")
 
         # Publish the transformed pose
         self.pose_publishers[topic_name].publish(pose_stamped_msg)
 
-def main(args=None):
+def main(cli_args=None):
+    global args
     source_directory = "demo_data"
     file_paths = glob.glob(os.path.join(source_directory, '**', '*.obj'), recursive=True) + \
                  glob.glob(os.path.join(source_directory, '**', '*.stl'), recursive=True) + \
@@ -384,8 +527,33 @@ def main(args=None):
     # Call the function to rearrange files through the GUI
     new_file_paths = rearrange_files(file_paths)
 
-    rclpy.init(args=args)
-    node = PoseEstimationNode(new_file_paths)
+    if cli_args is None:
+        parsed_args = args
+    elif isinstance(cli_args, argparse.Namespace):
+        parsed_args = cli_args
+    else:
+        parsed_args = parser.parse_args(args=cli_args)
+
+    args = parsed_args
+    rclpy.init(args=None)
+    camera_config = resolve_camera_config(
+        parsed_args.camera,
+        parsed_args.color_topic,
+        parsed_args.depth_topic,
+        parsed_args.info_topic,
+        parsed_args.camera_frame,
+    )
+    min_depth, max_depth = resolve_depth_range(parsed_args.camera, parsed_args.min_depth, parsed_args.max_depth)
+    node = PoseEstimationNode(
+        new_file_paths,
+        camera_config,
+        parsed_args.base_frame,
+        parsed_args.output_frame,
+        min_depth,
+        max_depth,
+        use_tf=not parsed_args.no_tf,
+        scale=parsed_args.scale,
+    )
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
