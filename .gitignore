@@ -16,3 +16,10 @@ _misc/
 # Ignore pt files
 *.pt
 sam2.1_b.pt
+
+# Ignore mesh files
+demo_data/
+
+build/
+install/
+log/

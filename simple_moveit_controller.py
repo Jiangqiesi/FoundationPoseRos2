@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 基础版：订阅手动发布的 PoseStamped，调用 MoveIt 规划并用 RealMan SDK 执行
+# 基础版：订阅手动发布的 PoseStamped，调用 MoveIt 规划并用 RealMan SDK 执行（静态目标）
 import argparse
 import math
 import sys
@@ -110,6 +110,10 @@ class SimpleMoveItController(Node):
         return raw
 
     # 发布关节状态
+    """
+    实时同步机械臂关节状态：从硬件控制器获取当前关节角度，发布到 /joint_states 话题
+    更新MoveIt起始状态：将获取的关节状态同步到MoveIt规划器中作为规划的起始状态
+    """
     def _publish_joint_state(self):
         joints_rad = self._get_hardware_joints_rad()
         size = min(len(joints_rad), len(self.joint_names))
@@ -133,8 +137,11 @@ class SimpleMoveItController(Node):
         except Exception as exc:
             self.get_logger().warn(f"同步 start_state 失败: {exc}")
 
-    # ---- 回调与执行 ----
-    # 检查位姿是否改变
+    # ---- 回调、规划与执行 ----
+    # 检查目标位姿是否改变
+    """
+    避免重复规划相同的目标位置（阈值设置为1mm）
+    """
     def _pose_changed(self, pose: PoseStamped) -> bool:
         p = pose.pose.position
         q = pose.pose.orientation
@@ -151,7 +158,11 @@ class SimpleMoveItController(Node):
             return True
         return False
 
-    # 位姿回调
+    # 目标位姿回调
+    """
+    主控制流程：接收目标位姿消息，进行规划和执行的主循环
+    执行状态管理：防止在执行过程中接收新指令（串行执行）
+    """
     def _on_pose(self, msg: PoseStamped):
         if self.currently_executing:
             return
@@ -198,11 +209,28 @@ class SimpleMoveItController(Node):
             jt = msg.joint_trajectory
             name_to_index = {name: i for i, name in enumerate(jt.joint_names)}
             joint_order = group_joint_order or self.joint_names or jt.joint_names
+            num_points = len(jt.points)
 
             for i, point in enumerate(jt.points):
                 positions = [point.positions[name_to_index[n]] for n in joint_order]
                 positions_deg = _rad2deg_list(positions)
-                ret = self.rm_controller.movej(positions_deg)
+                
+                is_last_point = (i == num_points - 1)
+                if is_last_point:
+                    # 最后一个点：connect=0 触发执行，block=1 等待完成
+                    connect_flag = 0
+                    radius = 0
+                    block_flag = 1 
+                else:
+                    # 中间所有点：connect=1 加入平滑队列，block=1 会立即返回
+                    connect_flag = 1
+                    radius = 100  # 交融半径系数(0-100)
+                    block_flag = 1
+                
+                self.get_logger().info(
+                    f"发送路点 {i+1}/{num_points}: 规划角度={positions_deg}, connect={connect_flag}, r={radius}"
+                )
+                ret = self.rm_controller.movej(positions_deg, v=20, r=radius, connect=connect_flag, block=block_flag)
                 if ret != 0:
                     self.get_logger().error(f"路点 {i} 执行失败，错误码: {ret}")
                     return False
@@ -210,7 +238,6 @@ class SimpleMoveItController(Node):
         except Exception as exc:
             self.get_logger().error(f"执行轨迹出错: {exc}")
             return False
-
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="手动位姿 -> MoveIt 规划 -> RealMan 执行")

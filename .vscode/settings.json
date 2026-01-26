@@ -1,4 +1,19 @@
 {
     "python.analysis.autoImportCompletions": true,
-    "cmake.sourceDirectory": "/home/ym/IML/FoundationPoseROS2/FoundationPose/eigen-3.4.0"
+    "cmake.sourceDirectory": "/home/ym/IML/FoundationPoseROS2/FoundationPose/eigen-3.4.0",
+    "ROS2.distro": "humble",
+    "python.autoComplete.extraPaths": [
+        "/home/ym/IML/FoundationPoseROS2/install/nvdiffrast/lib/python3.10/site-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages",
+        "",
+        "/home/ym/openvla-main/experiments/test/robot/RM_API2/pyorbbecsdk/install/lib"
+    ],
+    "python.analysis.extraPaths": [
+        "/home/ym/IML/FoundationPoseROS2/install/nvdiffrast/lib/python3.10/site-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages",
+        "",
+        "/home/ym/openvla-main/experiments/test/robot/RM_API2/pyorbbecsdk/install/lib"
+    ]
 }
