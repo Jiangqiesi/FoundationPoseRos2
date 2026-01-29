@@ -126,7 +126,19 @@ parser = argparse.ArgumentParser()
 code_dir = os.path.dirname(os.path.realpath(__file__))
 parser.add_argument('--est_refine_iter', type=int, default=4)
 parser.add_argument('--track_refine_iter', type=int, default=2)
-parser.add_argument('--scale', type=float, default=1.0, help='Scale factor for the 3D models')
+# parser.add_argument('--scale', type=float, default=1.0, help='Scale factor for the 3D models')
+# 【修改-替换】 支持多模型不同scale
+parser.add_argument(
+    '--scale',
+    type=str,
+    default="1.0",
+    help=(
+        'Scale factor for the 3D models. Use a single value (e.g. 0.001) or a list '
+        '(e.g. 0.001,1.0,0.01). If fewer values than models are provided, the rest '
+        'default to 1.0.'
+    ),
+)
+
 parser.add_argument('--camera', type=str, default='d435', help='Camera namespace (e.g., d405, d435)')
 parser.add_argument('--color_topic', type=str, default=None, help='Override color image topic')
 parser.add_argument('--depth_topic', type=str, default=None, help='Override depth image topic')
@@ -165,8 +177,31 @@ def resolve_depth_range(camera_name, min_depth, max_depth):
         default_max if max_depth is None else max_depth,
     )
 
+# 【修改-新增】 支持多模型不同scale
+def parse_scales(scale_arg, count):
+    """Parse --scale into a per-model list."""
+    if isinstance(scale_arg, (int, float)):
+        return [float(scale_arg)] * count
+    raw = str(scale_arg).strip()
+    if not raw:
+        return [1.0] * count
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    try:
+        values = [float(p) for p in parts]
+    except ValueError as exc:
+        raise ValueError(f"Invalid --scale value: {scale_arg}") from exc
+    if len(values) == 1:
+        return values * count
+    if len(values) > count:
+        raise ValueError(f"--scale expects at most {count} values, got {len(values)}")
+    if len(values) < count:
+        values.extend([1.0] * (count - len(values)))
+    return values
+
 class PoseEstimationNode(Node):
-    def __init__(self, new_file_paths, camera_config, base_frame, output_frame, min_depth, max_depth, use_tf, scale):
+    # def __init__(self, new_file_paths, camera_config, base_frame, output_frame, min_depth, max_depth, use_tf, scale):
+    # 【修改-替换】 支持多模型不同scale
+    def __init__(self, new_file_paths, camera_config, base_frame, output_frame, min_depth, max_depth, use_tf, scales):
         super().__init__('pose_estimation_node')
         
         # ROS subscriptions and publishers
@@ -196,14 +231,17 @@ class PoseEstimationNode(Node):
         # Load meshes
         self.mesh_files = new_file_paths
         self.meshes = [trimesh.load(mesh) for mesh in self.mesh_files]
-        for mesh in self.meshes:
-            mesh.apply_scale(scale)
+        # for mesh in self.meshes:
+        # mesh.apply_scale(scale)
+        # 【修改-替换】 支持多模型不同scale
+        for mesh, s in zip(self.meshes, scales):
+            mesh.apply_scale(s)
         
         # [修改] 直接使用相对于原始原点的轴对齐包围盒 (AABB)
-        # self.bounds = [trimesh.bounds.oriented_bounds(mesh) for mesh in self.meshes]
-        # self.bboxes = [np.stack([-extents/2, extents/2], axis=0).reshape(2, 3) for _, extents in self.bounds]
+        self.bounds = [trimesh.bounds.oriented_bounds(mesh) for mesh in self.meshes]
+        self.bboxes = [np.stack([-extents/2, extents/2], axis=0).reshape(2, 3) for _, extents in self.bounds]
         # mesh.bounds 返回 [[min_x, min_y, min_z], [max_x, max_y, max_z]]
-        self.bboxes = [mesh.bounds for mesh in self.meshes]
+        # self.bboxes = [mesh.bounds for mesh in self.meshes]
 
         self.scorer = ScorePredictor()
         self.refiner = PoseRefinePredictor()
@@ -356,7 +394,7 @@ class PoseEstimationNode(Node):
                             # Temporarily store the mesh and bounds to avoid permanent removal
                             temp_mesh = self.meshes.pop(0)  # Remove the first mesh in line
                             # [修改] 不再弹出 bounds，因为我们不再维护 self.bounds 列表
-                            # temp_to_origin, _ = self.bounds.pop(0)  # Remove the first bound in line
+                            temp_to_origin, _ = self.bounds.pop(0)  # Remove the first bound in line
 
                             # Initialize FoundationPose for each detected object with corresponding mesh
                             pose_est = FoundationPose(
@@ -371,7 +409,7 @@ class PoseEstimationNode(Node):
                             temporary_pose_estimations[sequential_id] = {
                                 'pose_est': pose_est,
                                 'mask': selected_obj['mask'],
-                                # 'to_origin': temp_to_origin   # [修改] 不再维护偏移矩阵
+                                'to_origin': temp_to_origin   # [修改] 不再维护偏移矩阵
                             }
 
                             # Refresh the dialog box with the updated object name
@@ -424,7 +462,7 @@ class PoseEstimationNode(Node):
 
                         # Remove the first mesh and bounds in line
                         self.meshes.pop(0)
-                        # self.bounds.pop(0)    # [修改] 不再维护 self.bounds 列表
+                        self.bounds.pop(0)    # [修改] 不再维护 self.bounds 列表
 
                         refresh_dialog_box()
                     elif key in [ord('q'), 27]:  # 'q' or Esc to quit
@@ -438,7 +476,7 @@ class PoseEstimationNode(Node):
                             # Remove the corresponding meshes and bounds from the original lists only after confirmation
                             selected_indices = sorted(temporary_pose_estimations.keys(), reverse=True)
                             self.meshes = [self.meshes[idx] for idx in selected_indices]
-                            # self.bounds = [self.bounds[idx] for idx in selected_indices]  # [修改] 不再维护 self.bounds 列表
+                            self.bounds = [self.bounds[idx] for idx in selected_indices]  # [修改] 不再维护 self.bounds 列表
 
                             masks_accepted = True  # Exit the outer loop if masks are accepted
                             break
@@ -450,10 +488,10 @@ class PoseEstimationNode(Node):
         for idx, data in self.pose_estimations.items():
             pose_est = data['pose_est']
             obj_mask = data['mask']
-            # to_origin = data['to_origin']  # [修改] 不再维护偏移矩阵
+            to_origin = data['to_origin']  # [修改] 不再维护偏移矩阵
             if pose_est.is_register:
                 pose = pose_est.track_one(rgb=color, depth=depth, K=self.cam_K, iteration=args.track_refine_iter)
-                center_pose = pose # @ np.linalg.inv(to_origin) # [修改] 不再维护偏移矩阵
+                center_pose = pose @ np.linalg.inv(to_origin) # [修改] 不再维护偏移矩阵
 
                 self.publish_pose_stamped(center_pose, f"/Current_OBJ_position_{idx+1}")
 
@@ -544,6 +582,8 @@ def main(cli_args=None):
         parsed_args.camera_frame,
     )
     min_depth, max_depth = resolve_depth_range(parsed_args.camera, parsed_args.min_depth, parsed_args.max_depth)
+    # 【修改-新增】 支持多模型不同scale
+    scales = parse_scales(parsed_args.scale, len(new_file_paths))
     node = PoseEstimationNode(
         new_file_paths,
         camera_config,
@@ -552,7 +592,9 @@ def main(cli_args=None):
         min_depth,
         max_depth,
         use_tf=not parsed_args.no_tf,
-        scale=parsed_args.scale,
+        # scale=parsed_args.scale,
+        # 【修改-替换】 支持多模型不同scale
+        scales=scales,
     )
     rclpy.spin(node)
     node.destroy_node()
