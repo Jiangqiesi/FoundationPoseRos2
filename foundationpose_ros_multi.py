@@ -22,6 +22,7 @@ import tkinter as tk
 from tkinter import Listbox, END, Button
 import glob
 import tf2_ros
+from message_filters import Subscriber, ApproximateTimeSynchronizer
 
 # Save the original `__init__` and `register` methods
 original_init = FoundationPose.__init__
@@ -153,10 +154,10 @@ args = parser.parse_args()
 
 def resolve_camera_config(camera_name, color_topic, depth_topic, info_topic, camera_frame):
     camera_name = camera_name.lstrip("/")
-    default_color = f"/{camera_name}/{camera_name}_color/image_raw"
+    default_color = f"/{camera_name}/{camera_name}_depth/image_raw"
     default_depth = f"/{camera_name}/{camera_name}_depth/depth/image_raw"
-    default_info = f"/{camera_name}/{camera_name}_color/camera_info"
-    default_frame = f"{camera_name}_color_optical_frame"
+    default_info = f"/{camera_name}/{camera_name}_depth/camera_info"
+    default_frame = f"{camera_name}_depth_optical_frame"
 
     return {
         "color_topic": color_topic or default_color,

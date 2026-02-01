@@ -573,16 +573,16 @@ def main():
                        help='Object IDs to subscribe to (default: [1])')
     parser.add_argument('--auto-move', action='store_true',
                        help='Enable automatic movement mode')
-    parser.add_argument('--offset-z', type=float, default=0.2,
-                       help='Z offset for grasp (default: 0.2m)')
+    parser.add_argument('--offset-z', type=float, default=0.14,
+                       help='Z offset for grasp (default: 0.14m)')
     parser.add_argument('--disable-grasp', action='store_true',
                        help='Disable grasping (only move to position)')
     parser.add_argument('--lift-height', type=float, default=0.1,
                        help='Lift height after grasp (default: 0.1m)')
     parser.add_argument('--approach-distance', type=float, default=0.1,
                        help='Approach distance above object (default: 0.1m)')
-    parser.add_argument('--gripper-open-pos', type=float, default=0.04,
-                       help='Gripper open position (default: 0.04)')
+    parser.add_argument('--gripper-open-pos', type=float, default=0.8,
+                       help='Gripper open position (default: 0.8)')
     parser.add_argument('--gripper-close-pos', type=float, default=0.0,
                        help='Gripper close position (default: 0.0)')
 
