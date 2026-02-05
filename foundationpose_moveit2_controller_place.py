@@ -5,6 +5,13 @@ FoundationPose MoveIt2 Controller for Gazebo Simulation
 This controller integrates FoundationPose 6D pose estimation with MoveIt2 motion planning
 for robot manipulation in Gazebo simulation environment.
 """
+"""
+使用方法示例：一一对应工件 ID 和模型名称，实现抓取与放置功能，如果不传模型名称，则使用默认的硬编码模型映射。
+python foundationpose_moveit2_controller_place.py \
+  --objects 1 2 5 \
+  --model-names g0801 g0802 g0101
+"""
+
 import math
 from pathlib import Path
 
@@ -15,6 +22,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from control_msgs.action import GripperCommand
+from linkattacher_msgs.srv import AttachLink, DetachLink
 from moveit.planning import MoveItPy
 from moveit.core.robot_state import RobotState
 from moveit_configs_utils import MoveItConfigsBuilder
@@ -34,7 +42,7 @@ class FoundationPoseMoveIt2Controller(Node):
     and gripper control for grasping operations.
     """
 
-    def __init__(self, object_ids, offset_z, approach_distance, lift_height,
+    def __init__(self, object_ids, model_map, offset_z, approach_distance, lift_height,
                 gripper_open_pos, gripper_close_pos,
                 auto_move=False, enable_grasp=True):
         # Initialize node with use_sim_time enabled to sync with Gazebo simulation clock
@@ -70,18 +78,19 @@ class FoundationPoseMoveIt2Controller(Node):
             ]
         )
 
-        # 初始化时定义工件相对目标工件的硬偏移
+        # 初始化时定义工件相对目标工件的硬编码偏移量
         self.layout_config = {
             1: (-0.02,  0.0495), # x, y
             2: (0.02, 0.0495),
             3: (0.0,    0.0),
             4: (0.0,   -0.0495),
         }
-        # 放置偏移高度（比如每个物体都放在目标上方 1 cm 处）
-        self.stacking_height = 0.01
+        # 放置偏移高度（比如每个物体都放在目标上方 2 cm 处）
+        self.stacking_height = 0.02
 
         # Store parameters
         self.object_ids = object_ids
+        self.model_map = model_map # [新增] 存储映射关系
         self.auto_move = auto_move
         self.offset_z = offset_z
         self.enable_grasp = enable_grasp
@@ -89,6 +98,17 @@ class FoundationPoseMoveIt2Controller(Node):
         self.approach_distance = approach_distance
         self.gripper_open_pos = gripper_open_pos
         self.gripper_close_pos = gripper_close_pos
+
+        # 如果命令行没传模型名称，就用默认的硬编码模型映射（方便调试）
+        if not self.model_map and 1 in self.object_ids:
+             self.model_map = {
+                 1: "g0801", 
+                 2: "g0802", 
+                 3: "g0601", 
+                 4: "g0701",
+                 5: "g0101" # 假设 ID 5 是底座
+             }
+             self.get_logger().info("Using default hardcoded model map.")
 
         # State tracking
         self.latest_poses = {}
@@ -116,6 +136,15 @@ class FoundationPoseMoveIt2Controller(Node):
             '/robot_hand_controller/gripper_cmd',
             callback_group=self.callback_group
         )
+
+        # IFRA LinkAttacher service clients
+        self.attach_client = self.create_client(AttachLink, '/ATTACHLINK')
+        self.detach_client = self.create_client(DetachLink, '/DETACHLINK')
+
+        # LinkAttacher configuration (adjust these names to match your Gazebo models)
+        self.robot_model_name = 'rm75_robot'  # Gazebo model name for the robot
+        self.robot_ee_link_name = 'Link7'  # End-effector link name
+        self.object_link_name = 'link'  # Default link name for objects
 
         # Initialize MoveIt2
         try:
@@ -181,6 +210,18 @@ class FoundationPoseMoveIt2Controller(Node):
         else:
             self.gripper_available = True
             self.get_logger().info('Gripper action server connected')
+
+        # Wait for LinkAttacher services
+        self.get_logger().info('Waiting for IFRA LinkAttacher services...')
+        self.link_attacher_available = True
+        if not self.attach_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().warn('/ATTACHLINK service not available, link attacher disabled')
+            self.link_attacher_available = False
+        if not self.detach_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().warn('/DETACHLINK service not available, link attacher disabled')
+            self.link_attacher_available = False
+        if self.link_attacher_available:
+            self.get_logger().info('IFRA LinkAttacher services connected')
 
         # Subscribe to object pose topics
         for obj_id in self.object_ids:
@@ -260,6 +301,56 @@ class FoundationPoseMoveIt2Controller(Node):
         else:
             return True
 
+    def attach_object(self, object_model_name: str) -> bool:
+        """Attach object to robot end-effector using IFRA LinkAttacher."""
+        if not self.link_attacher_available:
+            self.get_logger().warn('LinkAttacher service not available')
+            return False
+
+        self.get_logger().info(f'Attaching object {object_model_name} to {self.robot_ee_link_name}...')
+
+        req = AttachLink.Request()
+        req.model1_name = self.robot_model_name
+        req.link1_name = self.robot_ee_link_name
+        req.model2_name = object_model_name
+        req.link2_name = self.object_link_name
+
+        future = self.attach_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+
+        if future.done():
+            result = future.result()
+            self.get_logger().info(f'Attach result: {result}')
+            return True
+        else:
+            self.get_logger().error('Attach service call timeout')
+            return False
+
+    def detach_object(self, object_model_name: str) -> bool:
+        """Detach object from robot end-effector using IFRA LinkAttacher."""
+        if not self.link_attacher_available:
+            self.get_logger().warn('LinkAttacher service not available')
+            return False
+
+        self.get_logger().info(f'Detaching object {object_model_name} from {self.robot_ee_link_name}...')
+
+        req = DetachLink.Request()
+        req.model1_name = self.robot_model_name
+        req.link1_name = self.robot_ee_link_name
+        req.model2_name = object_model_name
+        req.link2_name = self.object_link_name
+
+        future = self.detach_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+
+        if future.done():
+            result = future.result()
+            self.get_logger().info(f'Detach result: {result}')
+            return True
+        else:
+            self.get_logger().error('Detach service call timeout')
+            return False
+
     def pose_callback(self, msg, object_id):
         """Callback for receiving object poses from FoundationPose."""
         self.latest_poses[object_id] = msg
@@ -273,6 +364,7 @@ class FoundationPoseMoveIt2Controller(Node):
             return
 
         current_positions = self.get_current_joint_positions()
+        self.get_logger().info(f'Current joint positions: {current_positions}')
 
         if not current_positions:
             self.get_logger().warn('No joint state data available yet')
@@ -436,11 +528,22 @@ class FoundationPoseMoveIt2Controller(Node):
 
         # Step 4: Close gripper gently with low force
         self.get_logger().info('Step 4: Closing gripper gently')
-        if not self.close_gripper(max_effort=0.001):
+        if not self.close_gripper(max_effort=-0.1):
             self.get_logger().error('Failed to close gripper')
             return False
         # Wait for gripper to firmly grasp
-        time.sleep(1.5)
+        time.sleep(0.5)
+
+        # Step 4.5: Attach object to end-effector using IFRA LinkAttacher
+        # [修改] 从字典获取模型名，而不是写死
+        object_model_name = self.model_map.get(object_id)
+        if object_model_name:
+            self.get_logger().info(f'Step 4.5: Attaching object {object_model_name} (ID {object_id}) to gripper')
+            if not self.attach_object(object_model_name):
+                self.get_logger().warn('Failed to attach object (continuing anyway)')
+        else:
+            self.get_logger().warn(f'No model name found for ID {object_id}, skipping attachment.')
+        time.sleep(0.5)
 
         # Step 5: Lift object
         self.get_logger().info(f'Step 5: Lifting object (z={lift_z:.3f}m)')
@@ -530,6 +633,16 @@ class FoundationPoseMoveIt2Controller(Node):
                 return False
             time.sleep(1.5) # 等待稳定
 
+            # Step 2.5: [新增] 解除物体绑定 (Detach)
+            source_model_name = self.model_map.get(source_obj_id)
+            if source_model_name:
+                self.get_logger().info(f'Detaching object {source_model_name} before release')
+                if not self.detach_object(source_model_name):
+                    self.get_logger().warn('Failed to detach object (continuing anyway)')
+            else:
+                self.get_logger().warn(f'No model name found for ID {source_obj_id}, skipping detachment.')
+            time.sleep(0.5) # 给仿真物理引擎一点时间结算分离
+
             # 3. 打开手爪释放物体 (Release)
             self.get_logger().info('Opening gripper to release object')
             if not self.open_gripper():
@@ -556,7 +669,7 @@ class FoundationPoseMoveIt2Controller(Node):
     def move_to_home(self):
             """移动回原始姿态 (Home)"""
             self.get_logger().info('Moving to HOME position...')
-            home_pose = self.create_pose_stamped(0, 0, 0.9, 0, 0, 0, 1)
+            home_pose = self.create_pose_stamped(0, 0, 0.9, [0, 0, 0, 1])
             
             return self.move_with_moveit(home_pose)
 
@@ -713,9 +826,12 @@ def main():
     parser = argparse.ArgumentParser(description='FoundationPose MoveIt2 Controller for Gazebo')
     parser.add_argument('--objects', nargs='+', type=int, default=[1],
                        help='Object IDs to subscribe to (default: [1])')
+    # [新增] 传入对应的 Gazebo 模型名称
+    parser.add_argument('--model-names', nargs='+', type=str, default=[],
+                       help='Gazebo model names corresponding to the object IDs (order matters!)')
     parser.add_argument('--auto-move', action='store_true',
                        help='Enable automatic movement mode')
-    parser.add_argument('--offset-z', type=float, default=0.15,
+    parser.add_argument('--offset-z', type=float, default=0.145,
                        help='Z offset for grasp (default: 0.15m)')
     parser.add_argument('--approach-distance', type=float, default=0.1,
                        help='Approach distance above object (default: 0.1m)')
@@ -725,10 +841,21 @@ def main():
                        help='Disable grasping (only move to position)')
     parser.add_argument('--gripper-open-pos', type=float, default=0.8,
                        help='Gripper open position (default: 0.8)')
-    parser.add_argument('--gripper-close-pos', type=float, default=0.0,
+    parser.add_argument('--gripper-close-pos', type=float, default=0.25,
                        help='Gripper close position (default: 0.0)')
 
     args = parser.parse_args()
+
+    # [新增] 创建物体 ID 到模型名称的映射字典
+    model_map = {}
+    if args.model_names:
+        if len(args.objects) != len(args.model_names):
+            print(f"Error: Number of objects ({len(args.objects)}) and model names ({len(args.model_names)}) do not match!")
+            return
+        # 创建字典 {1: "g0801", 2: "g0802", ...}
+        model_map = dict(zip(args.objects, args.model_names))
+    else:
+        print("Warning: No model names provided. LinkAttacher might fail if names are not set manually.")
 
     rclpy.init()
 
@@ -736,6 +863,7 @@ def main():
     try:
         controller = FoundationPoseMoveIt2Controller(
             object_ids=args.objects,
+            model_map=model_map,  # [新增] 将映射传入控制器
             auto_move=args.auto_move,
             offset_z=args.offset_z,
             enable_grasp=not args.disable_grasp,

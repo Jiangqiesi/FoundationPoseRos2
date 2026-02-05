@@ -252,10 +252,10 @@ class PoseEstimationNode(Node):
         # --- 新增调试代码 End -
         
         # [修改] 直接使用相对于原始原点的轴对齐包围盒 (AABB)
-        self.bounds = [trimesh.bounds.oriented_bounds(mesh) for mesh in self.meshes]
-        self.bboxes = [np.stack([-extents/2, extents/2], axis=0).reshape(2, 3) for _, extents in self.bounds]
+        # self.bounds = [trimesh.bounds.oriented_bounds(mesh) for mesh in self.meshes]
+        # self.bboxes = [np.stack([-extents/2, extents/2], axis=0).reshape(2, 3) for _, extents in self.bounds]
         # mesh.bounds 返回 [[min_x, min_y, min_z], [max_x, max_y, max_z]]
-        # self.bboxes = [mesh.bounds for mesh in self.meshes]
+        self.bboxes = [mesh.bounds for mesh in self.meshes]
 
         self.scorer = ScorePredictor()
         self.refiner = PoseRefinePredictor()
@@ -408,7 +408,7 @@ class PoseEstimationNode(Node):
                             # Temporarily store the mesh and bounds to avoid permanent removal
                             temp_mesh = self.meshes.pop(0)  # Remove the first mesh in line
                             # [修改] 不再弹出 bounds，因为我们不再维护 self.bounds 列表
-                            temp_to_origin, _ = self.bounds.pop(0)  # Remove the first bound in line
+                            # temp_to_origin, _ = self.bounds.pop(0)  # Remove the first bound in line
 
                             # Initialize FoundationPose for each detected object with corresponding mesh
                             pose_est = FoundationPose(
@@ -423,7 +423,7 @@ class PoseEstimationNode(Node):
                             temporary_pose_estimations[sequential_id] = {
                                 'pose_est': pose_est,
                                 'mask': selected_obj['mask'],
-                                'to_origin': temp_to_origin   # [修改] 不再维护偏移矩阵
+                                # 'to_origin': temp_to_origin   # [修改] 不再维护偏移矩阵
                             }
 
                             # Refresh the dialog box with the updated object name
@@ -476,7 +476,7 @@ class PoseEstimationNode(Node):
 
                         # Remove the first mesh and bounds in line
                         self.meshes.pop(0)
-                        self.bounds.pop(0)    # [修改] 不再维护 self.bounds 列表
+                        # self.bounds.pop(0)    # [修改] 不再维护 self.bounds 列表
 
                         refresh_dialog_box()
                     elif key in [ord('q'), 27]:  # 'q' or Esc to quit
@@ -490,7 +490,7 @@ class PoseEstimationNode(Node):
                             # Remove the corresponding meshes and bounds from the original lists only after confirmation
                             selected_indices = sorted(temporary_pose_estimations.keys(), reverse=True)
                             self.meshes = [self.meshes[idx] for idx in selected_indices]
-                            self.bounds = [self.bounds[idx] for idx in selected_indices]  # [修改] 不再维护 self.bounds 列表
+                            # self.bounds = [self.bounds[idx] for idx in selected_indices]  # [修改] 不再维护 self.bounds 列表
 
                             masks_accepted = True  # Exit the outer loop if masks are accepted
                             break
@@ -502,10 +502,10 @@ class PoseEstimationNode(Node):
         for idx, data in self.pose_estimations.items():
             pose_est = data['pose_est']
             obj_mask = data['mask']
-            to_origin = data['to_origin']  # [修改] 不再维护偏移矩阵
+            # to_origin = data['to_origin']  # [修改] 不再维护偏移矩阵
             if pose_est.is_register:
                 pose = pose_est.track_one(rgb=color, depth=depth, K=self.cam_K, iteration=args.track_refine_iter)
-                center_pose = pose @ np.linalg.inv(to_origin) # [修改] 不再维护偏移矩阵
+                center_pose = pose #@ np.linalg.inv(to_origin) # [修改] 不再维护偏移矩阵
 
                 self.publish_pose_stamped(center_pose, f"/Current_OBJ_position_{idx+1}")
 

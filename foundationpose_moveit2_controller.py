@@ -15,6 +15,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from control_msgs.action import GripperCommand
+from linkattacher_msgs.srv import AttachLink, DetachLink
 from moveit.planning import MoveItPy
 from moveit.core.robot_state import RobotState
 from moveit_configs_utils import MoveItConfigsBuilder
@@ -108,6 +109,15 @@ class FoundationPoseMoveIt2Controller(Node):
             callback_group=self.callback_group
         )
 
+        # IFRA LinkAttacher service clients
+        self.attach_client = self.create_client(AttachLink, '/ATTACHLINK')
+        self.detach_client = self.create_client(DetachLink, '/DETACHLINK')
+
+        # LinkAttacher configuration (adjust these names to match your Gazebo models)
+        self.robot_model_name = 'rm75_robot'  # Gazebo model name for the robot
+        self.robot_ee_link_name = 'Link7'  # End-effector link name
+        self.object_link_name = 'link'  # Default link name for objects
+
         # Initialize MoveIt2
         try:
             self.get_logger().info('Initializing MoveIt2...')
@@ -173,6 +183,18 @@ class FoundationPoseMoveIt2Controller(Node):
             self.gripper_available = True
             self.get_logger().info('Gripper action server connected')
 
+        # Wait for LinkAttacher services
+        self.get_logger().info('Waiting for IFRA LinkAttacher services...')
+        self.link_attacher_available = True
+        if not self.attach_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().warn('/ATTACHLINK service not available, link attacher disabled')
+            self.link_attacher_available = False
+        if not self.detach_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().warn('/DETACHLINK service not available, link attacher disabled')
+            self.link_attacher_available = False
+        if self.link_attacher_available:
+            self.get_logger().info('IFRA LinkAttacher services connected')
+
         # Subscribe to object pose topics
         for obj_id in self.object_ids:
             topic_name = f'/Current_OBJ_position_{obj_id}'
@@ -208,12 +230,12 @@ class FoundationPoseMoveIt2Controller(Node):
         self.get_logger().info('Opening gripper...')
         return self._send_gripper_command(self.gripper_open_pos, wait)
 
-    def close_gripper(self, wait=True) -> bool:
-        """Close the gripper."""
-        self.get_logger().info('Closing gripper...')
-        return self._send_gripper_command(self.gripper_close_pos, wait)
+    def close_gripper(self, wait=True, max_effort: float = 5.0) -> bool:
+        """Close the gripper with controlled force."""
+        self.get_logger().info(f'Closing gripper with max_effort={max_effort}...')
+        return self._send_gripper_command(self.gripper_close_pos, wait, max_effort)
 
-    def _send_gripper_command(self, position: float, wait: bool) -> bool:
+    def _send_gripper_command(self, position: float, wait: bool, max_effort: float = 5.0) -> bool:
         """Send a gripper command via action client."""
         if not self.gripper_available:
             self.get_logger().warn('Gripper action server not available')
@@ -221,7 +243,7 @@ class FoundationPoseMoveIt2Controller(Node):
 
         goal = GripperCommand.Goal()
         goal.command.position = position
-        goal.command.max_effort = 50.0
+        goal.command.max_effort = max_effort  # Reduced force to prevent knocking objects
 
         self.get_logger().info(f'Sending gripper command: position={position:.3f}')
 
@@ -251,6 +273,56 @@ class FoundationPoseMoveIt2Controller(Node):
         else:
             return True
 
+    def attach_object(self, object_model_name: str) -> bool:
+        """Attach object to robot end-effector using IFRA LinkAttacher."""
+        if not self.link_attacher_available:
+            self.get_logger().warn('LinkAttacher service not available')
+            return False
+
+        self.get_logger().info(f'Attaching object {object_model_name} to {self.robot_ee_link_name}...')
+
+        req = AttachLink.Request()
+        req.model1_name = self.robot_model_name
+        req.link1_name = self.robot_ee_link_name
+        req.model2_name = object_model_name
+        req.link2_name = self.object_link_name
+
+        future = self.attach_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+
+        if future.done():
+            result = future.result()
+            self.get_logger().info(f'Attach result: {result}')
+            return True
+        else:
+            self.get_logger().error('Attach service call timeout')
+            return False
+
+    def detach_object(self, object_model_name: str) -> bool:
+        """Detach object from robot end-effector using IFRA LinkAttacher."""
+        if not self.link_attacher_available:
+            self.get_logger().warn('LinkAttacher service not available')
+            return False
+
+        self.get_logger().info(f'Detaching object {object_model_name} from {self.robot_ee_link_name}...')
+
+        req = DetachLink.Request()
+        req.model1_name = self.robot_model_name
+        req.link1_name = self.robot_ee_link_name
+        req.model2_name = object_model_name
+        req.link2_name = self.object_link_name
+
+        future = self.detach_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+
+        if future.done():
+            result = future.result()
+            self.get_logger().info(f'Detach result: {result}')
+            return True
+        else:
+            self.get_logger().error('Detach service call timeout')
+            return False
+
     def pose_callback(self, msg, object_id):
         """Callback for receiving object poses from FoundationPose."""
         self.latest_poses[object_id] = msg
@@ -261,9 +333,12 @@ class FoundationPoseMoveIt2Controller(Node):
     def sync_moveit_start_state(self):
         """Synchronize MoveIt start state with current joint positions from /joint_states."""
         if self.arm is None:
+            self.get_logger().warn('MoveIt arm planning component not initialized')
             return
 
+        self.get_logger().info('Synchronizing MoveIt start state with current joint positions from /joint_states...')
         current_positions = self.get_current_joint_positions()
+        self.get_logger().info(f'Current joint positions: {current_positions}')
 
         if not current_positions:
             self.get_logger().warn('No joint state data available yet')
@@ -279,11 +354,14 @@ class FoundationPoseMoveIt2Controller(Node):
                 return
 
         # Create RobotState and set positions
+        self.get_logger().info('Creating RobotState and setting joint positions...')
         robot_state = RobotState(self.robot_model)
+        self.get_logger().info('Setting joint group active positions...')
         robot_state.set_joint_group_active_positions(
             self.group_name,
             np.asarray(joint_positions, dtype=float)
         )
+        self.get_logger().info('Joint group active positions set')
         robot_state.update()
 
         try:
@@ -291,6 +369,7 @@ class FoundationPoseMoveIt2Controller(Node):
         except Exception:
             pass
 
+        self.get_logger().info('Setting MoveIt start state...')
         ok = self.arm.set_start_state(robot_state=robot_state)
         if not ok:
             self.get_logger().warn('set_start_state() returned False')
@@ -319,7 +398,9 @@ class FoundationPoseMoveIt2Controller(Node):
     def plan_to_pose(self, target_pose_stamped):
         """Plan a trajectory to the target pose using MoveIt."""
         try:
+            self.get_logger().info('Planning to target pose with MoveIt2...')
             self.sync_moveit_start_state()
+            self.get_logger().info('Start state synchronized with joint states')
             self.arm.set_goal_state(pose_stamped_msg=target_pose_stamped, pose_link="Link7")
 
             plan_result = self.arm.plan()
@@ -422,14 +503,24 @@ class FoundationPoseMoveIt2Controller(Node):
             # Return to approach position for safety
             self.move_with_moveit(approach_pose)
             return False
-        time.sleep(0.5)
+        # Wait for robot to settle and physics to stabilize
+        time.sleep(1.5)
 
-        # Step 4: Close gripper
-        self.get_logger().info('Step 4: Closing gripper')
-        if not self.close_gripper():
+        # Step 4: Close gripper gently with low force
+        self.get_logger().info('Step 4: Closing gripper gently')
+        if not self.close_gripper(max_effort=-1.0):
             self.get_logger().error('Failed to close gripper')
             return False
-        time.sleep(1.0)
+        # Wait for gripper to firmly grasp
+        time.sleep(0.5)
+
+        # Step 4.5: Attach object to end-effector using IFRA LinkAttacher
+        # Object model name in Gazebo (adjust naming convention as needed)
+        object_model_name = f'g0701'
+        self.get_logger().info(f'Step 4.5: Attaching object {object_model_name} to gripper')
+        if not self.attach_object(object_model_name):
+            self.get_logger().warn('Failed to attach object (continuing anyway)')
+        time.sleep(0.3)
 
         # Step 5: Lift object
         self.get_logger().info(f'Step 5: Lifting object (z={lift_z:.3f}m)')
@@ -573,8 +664,8 @@ def main():
                        help='Object IDs to subscribe to (default: [1])')
     parser.add_argument('--auto-move', action='store_true',
                        help='Enable automatic movement mode')
-    parser.add_argument('--offset-z', type=float, default=0.14,
-                       help='Z offset for grasp (default: 0.14m)')
+    parser.add_argument('--offset-z', type=float, default=0.145,
+                       help='Z offset for grasp (default: 0.15m)')
     parser.add_argument('--disable-grasp', action='store_true',
                        help='Disable grasping (only move to position)')
     parser.add_argument('--lift-height', type=float, default=0.1,
@@ -583,7 +674,7 @@ def main():
                        help='Approach distance above object (default: 0.1m)')
     parser.add_argument('--gripper-open-pos', type=float, default=0.8,
                        help='Gripper open position (default: 0.8)')
-    parser.add_argument('--gripper-close-pos', type=float, default=0.0,
+    parser.add_argument('--gripper-close-pos', type=float, default=0.25,
                        help='Gripper close position (default: 0.0)')
 
     args = parser.parse_args()
