@@ -10,6 +10,9 @@ for robot manipulation in Gazebo simulation environment.
 python foundationpose_moveit2_controller_place.py \
   --objects 1 2 5 \
   --model-names g0801 g0802 g0101
+
+抓取物体1并放置到物体5上
+python foundationpose_moveit2_controller_place.py --objects 1 5 --model-names g0801 g0101
 """
 
 import math
@@ -78,15 +81,15 @@ class FoundationPoseMoveIt2Controller(Node):
             ]
         )
 
-        # 初始化时定义工件相对目标工件的硬编码偏移量
-        self.layout_config = {
-            1: (-0.02,  0.0495), # x, y
-            2: (0.02, 0.0495),
-            3: (0.0,    0.0),
-            4: (0.0,   -0.0495),
+        # 抓取偏移配置：目标位置相对检测位置的偏移量 (offset_x, offset_y, offset_z)
+        # 抓取时：grasp_pos = detected_pos + offset
+        # 放置时：place_pos = target_pos + offset (使用源物体的偏移)
+        self.grasp_offset_config = {
+            1: (0.0331, 0.1062, 0.129),
+            2: (0.0831, 0.1062, 0.129),
+            3: (0.0,    0.0,    0.129),
+            4: (0.0,   -0.0495, 0.129),
         }
-        # 放置偏移高度（比如每个物体都放在目标上方 2 cm 处）
-        self.stacking_height = 0.02
 
         # Store parameters
         self.object_ids = object_ids
@@ -410,12 +413,45 @@ class FoundationPoseMoveIt2Controller(Node):
         pose.pose.orientation.w = float(quat_xyzw[3])
         return pose
 
+    def get_grasp_quat_from_object(self, object_orientation):
+        """
+        根据物体朝向计算夹爪姿态。
+        在物体姿态基础上添加旋转偏移：先绕Z轴逆时针旋转90度，再绕Y轴旋转180度。
+
+        :param object_orientation: 物体的朝向四元数 (geometry_msgs/Quaternion)
+        :return: 夹爪姿态四元数 [x, y, z, w]
+        """
+        # 物体姿态
+        obj_rot = R.from_quat([object_orientation.x, object_orientation.y, object_orientation.z, object_orientation.w])
+
+        # 旋转偏移：先绕Z轴逆时针90度，再绕Y轴180度
+        offset_rot = R.from_euler('zy', [90, 180], degrees=True)
+
+        # 组合旋转：物体姿态 * 偏移旋转
+        grasp_rot = obj_rot * offset_rot
+
+        return grasp_rot.as_quat().tolist()
+
     def get_downward_grasp_quat(self):
         """Return quaternion so the gripper points down (world -Z)."""
         # Assumes Link7 +X is the gripper approach axis; rotate +X -> -Z.
         # If your tool frame differs, adjust this rotation accordingly.
         quat = R.from_euler('y', -180.0, degrees=True).as_quat()
         return quat.tolist()
+
+    def transform_offset_to_world(self, local_offset, orientation):
+        """
+        将物体坐标系下的偏移量转换到世界坐标系。
+
+        :param local_offset: 物体坐标系下的偏移 (x, y, z)
+        :param orientation: 物体的朝向四元数 (x, y, z, w)
+        :return: 世界坐标系下的偏移 (x, y, z)
+        """
+        # 从四元数创建旋转矩阵
+        rot = R.from_quat([orientation.x, orientation.y, orientation.z, orientation.w])
+        # 将局部偏移旋转到世界坐标系
+        world_offset = rot.apply(np.array(local_offset))
+        return world_offset
 
     def plan_to_pose(self, target_pose_stamped):
         """Plan a trajectory to the target pose using MoveIt."""
@@ -486,19 +522,31 @@ class FoundationPoseMoveIt2Controller(Node):
 
         pose_msg = self.latest_poses[object_id]
         pos = pose_msg.pose.position
+        orient = pose_msg.pose.orientation
 
-        # Calculate positions
-        approach_z = pos.z + self.offset_z + self.approach_distance
-        grasp_z = pos.z + self.offset_z
+        # 获取该物体的抓取偏移量 (物体坐标系)
+        local_offset = self.grasp_offset_config.get(object_id, (0.0, 0.0, 0.0))
+        self.get_logger().info(f'Grasp offset (local) for object {object_id}: ({local_offset[0]:.4f}, {local_offset[1]:.4f}, {local_offset[2]:.4f})')
+
+        # 将偏移量从物体坐标系转换到世界坐标系
+        world_offset = self.transform_offset_to_world(local_offset, orient)
+        self.get_logger().info(f'Grasp offset (world) for object {object_id}: ({world_offset[0]:.4f}, {world_offset[1]:.4f}, {world_offset[2]:.4f})')
+
+        # 计算实际抓取位置 (检测位置 + 世界坐标系偏移)
+        grasp_x = pos.x + world_offset[0]
+        grasp_y = pos.y + world_offset[1]
+        grasp_z = pos.z + world_offset[2] + self.offset_z
+        approach_z = grasp_z + self.approach_distance
         lift_z = grasp_z + self.lift_height
 
-        # Use a vertical grasp orientation (gripper pointing down)
-        # Quaternion for gripper pointing down along world -Z axis
-        grasp_quat = self.get_downward_grasp_quat()
+        # 使用物体姿态作为夹爪姿态
+        grasp_quat = self.get_grasp_quat_from_object(orient)
 
         self.get_logger().info(f'Starting grasp sequence for object {object_id}')
-        self.get_logger().info(f'  Object position: ({pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f})')
-        self.get_logger().info(f'  Approach Z: {approach_z:.3f}, Grasp Z: {grasp_z:.3f}, Lift Z: {lift_z:.3f}')
+        self.get_logger().info(f'  Detected position: ({pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f})')
+        self.get_logger().info(f'  Detected orientation: ({orient.x:.3f}, {orient.y:.3f}, {orient.z:.3f}, {orient.w:.3f})')
+        self.get_logger().info(f'  Grasp position: ({grasp_x:.3f}, {grasp_y:.3f}, {grasp_z:.3f})')
+        self.get_logger().info(f'  Approach Z: {approach_z:.3f}, Lift Z: {lift_z:.3f}')
 
         # Step 1: Open gripper
         self.get_logger().info('Step 1: Opening gripper')
@@ -509,7 +557,7 @@ class FoundationPoseMoveIt2Controller(Node):
 
         # Step 2: Move to approach position (above object)
         self.get_logger().info(f'Step 2: Moving to approach position (z={approach_z:.3f}m)')
-        approach_pose = self.create_pose_stamped(pos.x, pos.y, approach_z, grasp_quat)
+        approach_pose = self.create_pose_stamped(grasp_x, grasp_y, approach_z, grasp_quat)
         if not self.move_with_moveit(approach_pose):
             self.get_logger().error('Failed to reach approach position')
             return False
@@ -517,7 +565,7 @@ class FoundationPoseMoveIt2Controller(Node):
 
         # Step 3: Move down to grasp position
         self.get_logger().info(f'Step 3: Moving to grasp position (z={grasp_z:.3f}m)')
-        grasp_pose = self.create_pose_stamped(pos.x, pos.y, grasp_z, grasp_quat)
+        grasp_pose = self.create_pose_stamped(grasp_x, grasp_y, grasp_z, grasp_quat)
         if not self.move_with_moveit(grasp_pose):
             self.get_logger().error('Failed to reach grasp position')
             # Return to approach position for safety
@@ -535,7 +583,6 @@ class FoundationPoseMoveIt2Controller(Node):
         time.sleep(0.5)
 
         # Step 4.5: Attach object to end-effector using IFRA LinkAttacher
-        # [修改] 从字典获取模型名，而不是写死
         object_model_name = self.model_map.get(object_id)
         if object_model_name:
             self.get_logger().info(f'Step 4.5: Attaching object {object_model_name} (ID {object_id}) to gripper')
@@ -547,7 +594,7 @@ class FoundationPoseMoveIt2Controller(Node):
 
         # Step 5: Lift object
         self.get_logger().info(f'Step 5: Lifting object (z={lift_z:.3f}m)')
-        lift_pose = self.create_pose_stamped(pos.x, pos.y, lift_z, grasp_quat)
+        lift_pose = self.create_pose_stamped(grasp_x, grasp_y, lift_z, grasp_quat)
         if not self.move_with_moveit(lift_pose):
             self.get_logger().error('Failed to lift object')
             self.open_gripper()
@@ -569,53 +616,59 @@ class FoundationPoseMoveIt2Controller(Node):
                 # Just move above the object without grasping
                 pose_msg = self.latest_poses[object_id]
                 pos = pose_msg.pose.position
+                orient = pose_msg.pose.orientation
 
-                target_z = pos.z + self.offset_z + self.approach_distance
-                grasp_quat = self.get_downward_grasp_quat()
+                # 获取该物体的抓取偏移量 (物体坐标系) 并转换到世界坐标系
+                local_offset = self.grasp_offset_config.get(object_id, (0.0, 0.0, 0.0))
+                world_offset = self.transform_offset_to_world(local_offset, orient)
 
-                target_pose = self.create_pose_stamped(pos.x, pos.y, target_z, grasp_quat)
+                target_x = pos.x + world_offset[0]
+                target_y = pos.y + world_offset[1]
+                target_z = pos.z + world_offset[2] + self.offset_z + self.approach_distance
+                grasp_quat = self.get_grasp_quat_from_object(orient)
+
+                target_pose = self.create_pose_stamped(target_x, target_y, target_z, grasp_quat)
                 return self.move_with_moveit(target_pose)
 
         except Exception as e:
             self.get_logger().error(f'Error moving to object: {e}')
             return False
 
-    def move_to_target(self, source_obj_id, target_obj_id, use_layout):
+    def move_to_target(self, source_obj_id, target_obj_id):
         """
         将当前抓取的物体移动并放置在指定的 target_obj_id 工件位置。
-        :param use_layout: 如果为 True, 则根据 layout_config 应用偏移；否则放置在中心。
+        使用源物体的 grasp_offset_config 来计算放置位置（基于目标物体的朝向）。
         """
         try:
             if target_obj_id not in self.latest_poses:
                 self.get_logger().warn(f'No pose found for target object {target_obj_id}')
                 return False
 
-            # 获取目标位置
+            # 获取目标位置和朝向
             target_pose_msg = self.latest_poses[target_obj_id]
             target_pos = target_pose_msg.pose.position
+            target_orient = target_pose_msg.pose.orientation
 
-            # 使用与抓取相同的姿态（手爪指向下方）
-            grasp_quat = self.get_downward_grasp_quat()
+            # 使用目标物体姿态计算放置姿态（与抓取相同逻辑）
+            grasp_quat = self.get_grasp_quat_from_object(target_orient)
 
-            # 计算放置位置
-            if use_layout:
-                # 只有当开启布局模式时，才去查表
-                offset_x, offset_y = self.layout_config.get(source_obj_id, (0.0, 0.0))
-                self.get_logger().info(f"Using layout offset for OBJ {source_obj_id}: ({offset_x}, {offset_y})")
-            else:
-                # 否则偏移量为 0，直接放中心
-                offset_x, offset_y = 0.0, 0.0
-                self.get_logger().info(f"No layout offset applied (Center placement)")
+            # 获取源物体的偏移量 (物体坐标系)，使用目标物体的朝向转换到世界坐标系
+            local_offset = self.grasp_offset_config.get(source_obj_id, (0.0, 0.0, 0.0))
+            world_offset = self.transform_offset_to_world(local_offset, target_orient)
+            self.get_logger().info(f'Place offset (local) for object {source_obj_id}: ({local_offset[0]:.4f}, {local_offset[1]:.4f}, {local_offset[2]:.4f})')
+            self.get_logger().info(f'Place offset (world): ({world_offset[0]:.4f}, {world_offset[1]:.4f}, {world_offset[2]:.4f})')
 
-            place_x = target_pos.x + offset_x
-            place_y = target_pos.y + offset_y
-            place_z = target_pos.z + self.offset_z + self.stacking_height # stacking_height可能需要微调，防止碰撞卡死
+            # 计算放置位置 (目标检测位置 + 世界坐标系偏移)
+            place_x = target_pos.x + world_offset[0]
+            place_y = target_pos.y + world_offset[1]
+            place_z = target_pos.z + world_offset[2] + self.offset_z
 
             self.get_logger().info(f'Starting place sequence to target object {target_obj_id}')
+            self.get_logger().info(f'Target detected position: ({target_pos.x:.3f}, {target_pos.y:.3f}, {target_pos.z:.3f})')
             self.get_logger().info(f'Place position: ({place_x:.3f}, {place_y:.3f}, {place_z:.3f})')
 
             # 1. 移动到目标上方位置 (Approach)
-            approach_z = target_pos.z + self.offset_z + self.approach_distance
+            approach_z = place_z + self.approach_distance
             self.get_logger().info(f'Moving to place approach position (z={approach_z:.3f}m)')
             approach_pose = self.create_pose_stamped(place_x, place_y, approach_z, grasp_quat)
             if not self.move_with_moveit(approach_pose):
@@ -631,9 +684,9 @@ class FoundationPoseMoveIt2Controller(Node):
                 # 如果下不去，尝试回到上方
                 self.move_with_moveit(approach_pose)
                 return False
-            time.sleep(1.5) # 等待稳定
+            time.sleep(1.5)  # 等待稳定
 
-            # Step 2.5: [新增] 解除物体绑定 (Detach)
+            # Step 2.5: 解除物体绑定 (Detach)
             source_model_name = self.model_map.get(source_obj_id)
             if source_model_name:
                 self.get_logger().info(f'Detaching object {source_model_name} before release')
@@ -641,7 +694,7 @@ class FoundationPoseMoveIt2Controller(Node):
                     self.get_logger().warn('Failed to detach object (continuing anyway)')
             else:
                 self.get_logger().warn(f'No model name found for ID {source_obj_id}, skipping detachment.')
-            time.sleep(0.5) # 给仿真物理引擎一点时间结算分离
+            time.sleep(0.5)  # 给仿真物理引擎一点时间结算分离
 
             # 3. 打开手爪释放物体 (Release)
             self.get_logger().info('Opening gripper to release object')
@@ -652,8 +705,7 @@ class FoundationPoseMoveIt2Controller(Node):
 
             # 4. 提起手臂离开物体 (Lift)
             self.get_logger().info('Lifting arm after placing object')
-            lift_z = approach_z
-            lift_pose = self.create_pose_stamped(place_x, place_y, lift_z, grasp_quat)
+            lift_pose = self.create_pose_stamped(place_x, place_y, approach_z, grasp_quat)
             if not self.move_with_moveit(lift_pose):
                 self.get_logger().error('Failed to lift arm after placing object')
                 return False
@@ -661,7 +713,7 @@ class FoundationPoseMoveIt2Controller(Node):
 
             self.get_logger().info(f'Successfully completed place sequence onto target object {target_obj_id}')
             return True
-        
+
         except Exception as e:
             self.get_logger().error(f'Error placing object: {e}')
             return False
@@ -771,12 +823,6 @@ class FoundationPoseMoveIt2Controller(Node):
 
                         print(f"Sequence Mode: Moving {source_ids} onto Target {target_id}")
 
-                        # 是否启用布局模式
-                        if len(input_ids) == 5:
-                            use_layout = True
-                        else:
-                            use_layout = False
-
                         # 检查目标位姿是否存在
                         if target_id not in self.latest_poses:
                             print(f"Error: Target object {target_id} pose not detected!")
@@ -785,7 +831,7 @@ class FoundationPoseMoveIt2Controller(Node):
                         # 依次循环处理源物体
                         for i, obj_id in enumerate(source_ids):
                             print(f"\n--- Sequence {i+1}/{len(source_ids)}: Processing Object {obj_id} ---")
-                            
+
                             # 1. 检查源物体位姿
                             if obj_id not in self.latest_poses:
                                 print(f"Skipping Object {obj_id}: Pose not detected.")
@@ -797,10 +843,10 @@ class FoundationPoseMoveIt2Controller(Node):
                                 print(f"Failed to pick object {obj_id}. Aborting this item.")
                                 self.open_gripper()
                                 continue # 跳过当前物体，尝试下一个
-                            
+
                             # 3. 放置 (Place)
                             print(f"STEP 2: Placing onto target {target_id}...")
-                            if not self.move_to_target(obj_id, target_id, use_layout):
+                            if not self.move_to_target(obj_id, target_id):
                                 print(f"Failed to place object {obj_id}.")
                                 self.open_gripper()
                             else:
