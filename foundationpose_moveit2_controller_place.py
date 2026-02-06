@@ -6,13 +6,14 @@ This controller integrates FoundationPose 6D pose estimation with MoveIt2 motion
 for robot manipulation in Gazebo simulation environment.
 """
 """
-使用方法示例：一一对应工件 ID 和模型名称，实现抓取与放置功能，如果不传模型名称，则使用默认的硬编码模型映射。
+使用方法示例（对应工件 ID 和模型名称，实现抓取与放置功能，如果不传模型名称，则使用默认的硬编码模型映射）：
+1. 抓取工件1 2并放置到底座5位置
 python foundationpose_moveit2_controller_place.py \
   --objects 1 2 5 \
   --model-names g0801 g0802 g0101
 
-抓取物体1并放置到物体5上
-python foundationpose_moveit2_controller_place.py --objects 1 5 --model-names g0801 g0101
+2. 依次抓取并放置所有工件
+python foundationpose_moveit2_controller_place.py --objects 1 2 3 4 5
 """
 
 import math
@@ -85,10 +86,10 @@ class FoundationPoseMoveIt2Controller(Node):
         # 抓取时：grasp_pos = detected_pos + offset
         # 放置时：place_pos = target_pos + offset (使用源物体的偏移)
         self.grasp_offset_config = {
-            1: (0.0331, 0.1062, 0.129),
-            2: (0.0831, 0.1062, 0.129),
-            3: (0.0,    0.0,    0.129),
-            4: (0.0,   -0.0495, 0.129),
+            1: (0.0358, 0.1116, 0.1240),
+            2: (0.0858, 0.1116, 0.1240),
+            3: (0.0608, 0.0606, 0.1240),
+            4: (0.0608, 0.0096, 0.1240),
         }
 
         # Store parameters
@@ -661,7 +662,7 @@ class FoundationPoseMoveIt2Controller(Node):
             # 计算放置位置 (目标检测位置 + 世界坐标系偏移)
             place_x = target_pos.x + world_offset[0]
             place_y = target_pos.y + world_offset[1]
-            place_z = target_pos.z + world_offset[2] + self.offset_z
+            place_z = target_pos.z + world_offset[2] + self.offset_z + 0.01  # 微调放置高度
 
             self.get_logger().info(f'Starting place sequence to target object {target_obj_id}')
             self.get_logger().info(f'Target detected position: ({target_pos.x:.3f}, {target_pos.y:.3f}, {target_pos.z:.3f})')
@@ -877,7 +878,7 @@ def main():
                        help='Gazebo model names corresponding to the object IDs (order matters!)')
     parser.add_argument('--auto-move', action='store_true',
                        help='Enable automatic movement mode')
-    parser.add_argument('--offset-z', type=float, default=0.145,
+    parser.add_argument('--offset-z', type=float, default=0.15,
                        help='Z offset for grasp (default: 0.15m)')
     parser.add_argument('--approach-distance', type=float, default=0.1,
                        help='Approach distance above object (default: 0.1m)')
@@ -887,7 +888,7 @@ def main():
                        help='Disable grasping (only move to position)')
     parser.add_argument('--gripper-open-pos', type=float, default=0.8,
                        help='Gripper open position (default: 0.8)')
-    parser.add_argument('--gripper-close-pos', type=float, default=0.25,
+    parser.add_argument('--gripper-close-pos', type=float, default=0.28,
                        help='Gripper close position (default: 0.0)')
 
     args = parser.parse_args()
