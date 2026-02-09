@@ -1,0 +1,21 @@
+frames:
+  base_frame: base_link
+  camera_frame: camera_color_optical_frame
+
+topics:
+  pose_topic_prefix: /Current_OBJ_position_
+
+motion:
+  pose_max_age_sec: 2.0
+  approach_distance: 0.10
+  lift_height: 0.10
+  place_approach_offset: 0.08
+  place_z_tweak: 0.00
+
+objects:
+  1:
+    place_offset_local: [0.0, 0.0, 0.15]
+    grasp_library: demo_data/ship_data/test2_grasp1
+  2:
+    place_offset_local: [0.0, 0.0, 0.15]
+    grasp_library: demo_data/ship_data/test2_grasp1

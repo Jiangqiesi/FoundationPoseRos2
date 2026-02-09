@@ -17,8 +17,6 @@ fi
 echo "正在 source 工作空间..."
 source install/setup.bash
 
-source ~/ws_moveit2_src/install/setup.bash
-
 echo "启动 MoveIt2 Demo (后台运行)..."
 ros2 launch rm_moveit2 demo.launch.py & DEMO_PID=$!
 

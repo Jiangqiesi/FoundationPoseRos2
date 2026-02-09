@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3.10
 # 基础版：订阅手动发布的 PoseStamped，调用 MoveIt 规划并用 RealMan SDK 执行（静态目标）
 import argparse
 import math
@@ -31,6 +31,10 @@ def _deg2rad_list(vals: List[float]) -> List[float]:
 # 弧度转角度
 def _rad2deg_list(vals: List[float]) -> List[float]:
     return [v * 180.0 / math.pi for v in vals]
+
+
+def _format_list(vals: List[float], precision: int = 2) -> str:
+    return "[" + ", ".join(f"{v:.{precision}f}" for v in vals) + "]"
 
 
 class SimpleMoveItController(Node):
@@ -214,6 +218,16 @@ class SimpleMoveItController(Node):
             for i, point in enumerate(jt.points):
                 positions = [point.positions[name_to_index[n]] for n in joint_order]
                 positions_deg = _rad2deg_list(positions)
+                velocities = (
+                    [point.velocities[name_to_index[n]] for n in joint_order]
+                    if point.velocities
+                    else []
+                )
+                accelerations = (
+                    [point.accelerations[name_to_index[n]] for n in joint_order]
+                    if point.accelerations
+                    else []
+                )
                 
                 is_last_point = (i == num_points - 1)
                 if is_last_point:
@@ -224,12 +238,21 @@ class SimpleMoveItController(Node):
                 else:
                     # 中间所有点：connect=1 加入平滑队列，block=1 会立即返回
                     connect_flag = 1
-                    radius = 100  # 交融半径系数(0-100)
+                    radius = 80  # 交融半径系数(0-100)
                     block_flag = 1
-                
-                self.get_logger().info(
-                    f"发送路点 {i+1}/{num_points}: 规划角度={positions_deg}, connect={connect_flag}, r={radius}"
+
+                log_msg = (
+                    f"发送路点 {i+1}/{num_points}: 规划角度={_format_list(positions_deg)}, "
+                    f"connect={connect_flag}, r={radius}"
                 )
+                if velocities:
+                    vel_deg = _rad2deg_list(velocities)
+                    log_msg += f", 速度(deg/s)={_format_list(vel_deg)}"
+                if accelerations:
+                    acc_deg = _rad2deg_list(accelerations)
+                    log_msg += f", 加速度(deg/s^2)={_format_list(acc_deg)}"
+                self.get_logger().info(log_msg)
+
                 ret = self.rm_controller.movej(positions_deg, v=20, r=radius, connect=connect_flag, block=block_flag)
                 if ret != 0:
                     self.get_logger().error(f"路点 {i} 执行失败，错误码: {ret}")

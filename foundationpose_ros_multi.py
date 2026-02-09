@@ -201,6 +201,8 @@ parser.add_argument('--grasp_file', type=str, default='demo_data/ship_data/test2
                     help='GraspGen抓取库文件 (object坐标系下的^oT_g)')
 parser.add_argument('--base_frame', type=str, default='base_link',
                     help='发布抓取/物体位姿使用的基坐标系名称')
+parser.add_argument('--scale', type=float, default=0.001,
+                    help='模型缩放系数，默认0.001（将mm转换为m）')
 args = parser.parse_args()
 
 class PoseEstimationNode(Node):
@@ -220,11 +222,7 @@ class PoseEstimationNode(Node):
         # Load meshes
         self.mesh_files = new_file_paths
         # unit: meter
-        model_scale = 1
-        # # other obj
-        # model_scale = 0.001 # 1mm = 0.001m
-        # # tray
-        # model_scale = 0.05
+        model_scale = args.scale
         self.meshes = [trimesh.load(mesh) for mesh in self.mesh_files]
         for mesh in self.meshes:
             mesh.apply_scale(model_scale)
