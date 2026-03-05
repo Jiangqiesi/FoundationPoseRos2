@@ -237,8 +237,8 @@ class SimpleMoveItController(Node):
                     block_flag = 1 
                 else:
                     # 中间所有点：connect=1 加入平滑队列，block=1 会立即返回
-                    connect_flag = 0
-                    radius = 0  # 交融半径系数(0-100)
+                    connect_flag = 1
+                    radius = 80  # 交融半径系数(0-100)
                     block_flag = 1
 
                 log_msg = (

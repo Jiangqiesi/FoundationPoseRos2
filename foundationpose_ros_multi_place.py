@@ -136,7 +136,7 @@ parser.add_argument(
     help=(
         'Scale factor for the 3D models. Use a single value (e.g. 0.001) or a list '
         '(e.g. 0.001,1.0,0.01). If fewer values than models are provided, the rest '
-        'default to 1.0.'
+        'default to 0.001.'
     ),
 )
 

@@ -86,10 +86,10 @@ class FoundationPoseMoveIt2Controller(Node):
         # 抓取时：grasp_pos = detected_pos + offset
         # 放置时：place_pos = target_pos + offset (使用源物体的偏移)
         self.grasp_offset_config = {
-            1: (0.0358, 0.1116, 0.1240),
-            2: (0.0858, 0.1116, 0.1240),
-            3: (0.0608, 0.0606, 0.1240),
-            4: (0.0608, 0.0096, 0.1240),
+            1: (0.035839, 0.111555, 0.1240),
+            2: (0.085839, 0.111555, 0.1240),
+            3: (0.060839, 0.060555, 0.1240),
+            4: (0.060839, 0.009555, 0.1240),
         }
 
         # Store parameters
@@ -807,6 +807,8 @@ class FoundationPoseMoveIt2Controller(Node):
                     
                     if not input_ids:
                         continue # 空输入，跳回循环，等待下次输入
+
+                    time.sleep(3.0)
 
                     # 情况 A: 只输入了一个 ID (e.g. "1") -> 只抓取，不放置
                     if len(input_ids) == 1:

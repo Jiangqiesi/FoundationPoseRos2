@@ -196,7 +196,7 @@ class FoundationPoseMoveIt2ControllerRealMan(Node):
         if self._looks_like_degree(raw):
             if not hasattr(self, "_warned_deg"):
                 self._warned_deg = True
-                self.get_logger().info("检测到关节值疑似"度"，自动转弧度")
+                self.get_logger().info("检测到关节值疑似度，自动转弧度")
             return _deg2rad_list(raw)
         return raw
 
@@ -349,8 +349,8 @@ class FoundationPoseMoveIt2ControllerRealMan(Node):
                     radius = 0
                     block_flag = 1
                 else:
-                    connect_flag = 0
-                    radius = 0
+                    connect_flag = 1
+                    radius = 80
                     block_flag = 1
 
                 self.get_logger().info(
