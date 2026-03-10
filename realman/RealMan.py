@@ -50,6 +50,35 @@ class RM_controller:
         # state_dict["joint"] 包含了关节角度列表
         return self.arm_controller.rm_get_current_arm_state()[1]["joint"]
 
+    def get_tcp_pose(self):
+        """
+        获取当前 TCP 欧拉角位姿。
+
+        Returns:
+            list: [x, y, z, rx, ry, rz]，单位(m, rad)。
+        """
+        return self.arm_controller.rm_get_current_arm_state()[1]["pose"]
+
+    def get_tcp_pose_quat_xyzw(self):
+        """
+        获取当前 TCP 位姿并转换为位置+四元数(xyzw)。
+
+        Returns:
+            dict: {
+                "position": [x, y, z],          # m
+                "quat_xyzw": [qx, qy, qz, qw],  # 四元数
+                "euler_rpy": [rx, ry, rz],      # rad
+            }
+        """
+        x, y, z, rx, ry, rz = [float(v) for v in self.get_tcp_pose()[:6]]
+        quat_wxyz = self.arm_controller.rm_algo_euler2quaternion([rx, ry, rz])
+        qw, qx, qy, qz = [float(v) for v in quat_wxyz]
+        return {
+            "position": [x, y, z],
+            "quat_xyzw": [qx, qy, qz, qw],
+            "euler_rpy": [rx, ry, rz],
+        }
+
     def get_gripper(self):
         """
         获取夹爪当前的位置。

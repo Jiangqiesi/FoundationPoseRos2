@@ -15,5 +15,8 @@
         "/opt/ros/humble/local/lib/python3.10/dist-packages",
         "",
         "/home/ym/openvla-main/experiments/test/robot/RM_API2/pyorbbecsdk/install/lib"
-    ]
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "python-envs.pythonProjects": []
 }
