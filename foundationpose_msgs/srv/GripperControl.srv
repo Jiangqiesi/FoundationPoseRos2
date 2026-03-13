@@ -1,0 +1,6 @@
+# 控制夹爪
+string action                 # "open" or "close"
+float32 value                 # 夹爪力度或位置 (0.0-1.0)
+---
+bool success
+string message

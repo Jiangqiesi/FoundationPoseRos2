@@ -1,0 +1,7 @@
+# 查询感知模块状态
+uint8 dummy                   # 无请求参数
+---
+bool ready                    # 感知模块是否就绪
+bool segmentation_done        # 分割是否完成
+uint32 num_tracked_objects    # 跟踪的物体数
+uint32[] tracked_object_ids   # 跟踪的物体 ID 列表

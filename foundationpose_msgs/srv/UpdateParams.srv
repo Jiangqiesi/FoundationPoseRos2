@@ -1,0 +1,6 @@
+# 更新感知或控制参数
+string param_name             # 参数名
+string value                  # 参数值 (序列化为字符串)
+---
+bool success
+string message

@@ -1,0 +1,8 @@
+# 查询控制器状态
+uint8 dummy                   # 无请求参数
+---
+bool robot_connected          # 机械臂是否连接
+bool moveit_ready             # MoveIt2 是否就绪
+bool currently_executing      # 是否正在执行任务
+float32[] current_joints      # 当前关节角度
+string[] joint_names          # 关节名称列表

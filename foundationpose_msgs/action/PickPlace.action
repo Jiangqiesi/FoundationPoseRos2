@@ -1,0 +1,20 @@
+# Goal: 定义抓取和放置任务的输入参数
+uint32[] object_ids           # 要抓取的物体 ID 列表
+uint32 target_id              # 放置目标的 ID (或者放置位置)
+bool enable_grasp              # 是否启用夹爪控制
+float32 offset_z               # Z 轴放置偏移
+float32 approach_distance      # 靠近物体时的距离
+float32 lift_height            # 提升高度
+---
+# Result: 任务完成结果
+bool success                   # 是否成功完成
+string message                 # 完成信息
+uint32[] completed_objects     # 成功抓取的物体 ID
+uint32[] failed_objects        # 失败的物体 ID
+---
+# Feedback: 任务进度反馈
+string stage                   # 当前阶段 ("opening_gripper", "approaching", "descending", "closing_gripper", "lifting", "moving_to_place", "placing")
+uint32 current_object_id       # 当前处理的物体 ID
+uint32 objects_completed       # 已完成的物体数
+uint32 objects_total           # 总物体数
+string detail                  # 详细描述

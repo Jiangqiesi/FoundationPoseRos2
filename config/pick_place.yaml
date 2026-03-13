@@ -19,3 +19,18 @@ objects:
   2:
     place_offset_local: [0.0, 0.0, 0.15]
     grasp_library: demo_data/ship_data/test2_grasp1
+
+server:
+  perception:
+    auto_assign: true
+    mesh_dir: demo_data
+    resegment_on_startup: true
+  controller:
+    action_name: /robot/pick_place
+    gripper_service: /controller/gripper
+    params_service: /controller/update_params
+    status_service: /controller/get_status
+  perception_services:
+    resegment: /perception/resegment
+    assign_models: /perception/assign_models
+    status: /perception/get_status

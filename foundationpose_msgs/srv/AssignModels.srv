@@ -1,0 +1,6 @@
+# 将网格模型分配给分割掩码
+string[] mesh_paths           # 网格文件路径列表
+uint32[] mask_indices         # 对应的掩码索引
+---
+bool success
+string message

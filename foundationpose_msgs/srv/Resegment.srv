@@ -1,0 +1,6 @@
+# 请求 SAM2 重新分割物体
+bool force
+---
+# 响应
+bool success
+string message
