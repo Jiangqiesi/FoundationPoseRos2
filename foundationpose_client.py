@@ -7,12 +7,20 @@ FoundationPose ROS2 客户端 API
 
 import os
 import sys
+import time
+import threading
 import yaml
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.task import Future
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.signals import SignalHandlerOptions
 from typing import List, Dict, Optional, Callable, Any
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
 
 # 动态添加 foundationpose_msgs 到路径
 _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -56,19 +64,16 @@ class FoundationPoseClient:
     def __init__(
         self, node_name: str = "foundationpose_client", config_path: str = None
     ):
-        """
-        初始化客户端
-
-        Args:
-            node_name: ROS2 节点名称
-            config_path: 配置文件路径，默认为 config/pick_place.yaml
-        """
         # 初始化 rclpy（如果尚未初始化）
+        # 禁用 rclpy 内置 SIGINT handler，避免 Ctrl+C 时 rclpy 抢先 shutdown
+        # 导致 node context 失效，cancel_current_action() 无法正常工作
         if not rclpy.ok():
-            rclpy.init()
+            rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
 
         self._node = Node(node_name)
         self._config = self._load_config(config_path)
+        self._bridge = CvBridge()
+        self._session_id: int = 0
 
         # 从配置读取服务名
         server_config = self._config.get("server", {})
@@ -111,6 +116,91 @@ class FoundationPoseClient:
         )
 
         self._current_goal_handle = None
+
+        # 图像订阅：mask 可视化 / mask 标签 / 位姿可视化
+        self._latest_masks_vis: Optional[np.ndarray] = None
+        self._latest_masks_label: Optional[np.ndarray] = None
+        self._latest_pose_vis: Optional[np.ndarray] = None
+        self._image_lock = threading.Lock()
+
+        latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self._masks_vis_sub = self._node.create_subscription(
+            Image,
+            "/perception/masks_visualization",
+            self._on_masks_vis,
+            latched_qos,
+        )
+        self._masks_label_sub = self._node.create_subscription(
+            Image,
+            "/perception/masks_label",
+            self._on_masks_label,
+            latched_qos,
+        )
+        self._pose_vis_sub = self._node.create_subscription(
+            Image,
+            "/perception/pose_visualization",
+            self._on_pose_vis,
+            10,
+        )
+
+        self._executor = MultiThreadedExecutor(num_threads=2)
+        self._executor.add_node(self._node)
+        self._spin_thread = threading.Thread(target=self._spin_background, daemon=True)
+        self._spin_thread.start()
+
+    def _spin_background(self) -> None:
+        try:
+            self._executor.spin()
+        except Exception:
+            pass
+
+    def _wait_for_future(self, future: Future, timeout_sec: float = 10.0) -> bool:
+        start = time.monotonic()
+        while not future.done():
+            if time.monotonic() - start > timeout_sec:
+                return False
+            time.sleep(0.01)
+        return True
+
+    def _on_masks_vis(self, msg: Image) -> None:
+        with self._image_lock:
+            self._latest_masks_vis = self._bridge.imgmsg_to_cv2(msg, "rgb8")
+
+    def _on_masks_label(self, msg: Image) -> None:
+        with self._image_lock:
+            self._latest_masks_label = self._bridge.imgmsg_to_cv2(msg, "mono8")
+
+    def _on_pose_vis(self, msg: Image) -> None:
+        with self._image_lock:
+            self._latest_pose_vis = self._bridge.imgmsg_to_cv2(msg, "rgb8")
+
+    @property
+    def session_id(self) -> int:
+        return self._session_id
+
+    def get_masks_visualization(self) -> Optional[np.ndarray]:
+        with self._image_lock:
+            return (
+                self._latest_masks_vis.copy()
+                if self._latest_masks_vis is not None
+                else None
+            )
+
+    def get_masks_label(self) -> Optional[np.ndarray]:
+        with self._image_lock:
+            return (
+                self._latest_masks_label.copy()
+                if self._latest_masks_label is not None
+                else None
+            )
+
+    def get_pose_visualization(self) -> Optional[np.ndarray]:
+        with self._image_lock:
+            return (
+                self._latest_pose_vis.copy()
+                if self._latest_pose_vis is not None
+                else None
+            )
 
     def _load_config(self, config_path: Optional[str]) -> Dict:
         """加载配置文件"""
@@ -198,7 +288,7 @@ class FoundationPoseClient:
         perception_req = PerceptionStatus.Request()
         perception_req.dummy = 0
         perception_future = self._perception_status_client.call_async(perception_req)
-        rclpy.spin_until_future_complete(self._node, perception_future, timeout_sec=5.0)
+        self._wait_for_future(perception_future, timeout_sec=5.0)
 
         if perception_future.result() is not None:
             resp = perception_future.result()
@@ -207,6 +297,7 @@ class FoundationPoseClient:
                 "segmentation_done": resp.segmentation_done,
                 "num_tracked_objects": resp.num_tracked_objects,
                 "tracked_object_ids": list(resp.tracked_object_ids),
+                "tracked_mesh_names": list(resp.tracked_mesh_names),
             }
         else:
             result["perception"] = {"error": "感知状态查询失败"}
@@ -215,7 +306,7 @@ class FoundationPoseClient:
         controller_req = ControllerStatus.Request()
         controller_req.dummy = 0
         controller_future = self._controller_status_client.call_async(controller_req)
-        rclpy.spin_until_future_complete(self._node, controller_future, timeout_sec=5.0)
+        self._wait_for_future(controller_future, timeout_sec=5.0)
 
         if controller_future.result() is not None:
             resp = controller_future.result()
@@ -232,49 +323,40 @@ class FoundationPoseClient:
         return result
 
     def resegment(self, force: bool = False) -> Dict[str, Any]:
-        """
-        请求重新分割物体
-
-        Args:
-            force: 是否强制重新分割
-
-        Returns:
-            包含 success 和 message 的字典
-        """
         request = Resegment.Request()
         request.force = force
 
         future = self._resegment_client.call_async(request)
-        rclpy.spin_until_future_complete(self._node, future, timeout_sec=10.0)
+        self._wait_for_future(future, timeout_sec=10.0)
 
         if future.result() is not None:
             resp = future.result()
-            return {"success": resp.success, "message": resp.message}
+            self._session_id = int(resp.session_id)
+            return {
+                "success": resp.success,
+                "message": resp.message,
+                "session_id": resp.session_id,
+                "num_masks": resp.num_masks,
+            }
         else:
             raise TimeoutError("重新分割请求超时")
 
     def assign_models(
-        self, mesh_paths: List[str], mask_indices: List[int]
+        self,
+        mesh_paths: List[str],
+        mask_indices: List[int],
+        session_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """
-        分配网格模型到分割掩码
-
-        Args:
-            mesh_paths: 网格文件路径列表
-            mask_indices: 对应的掩码索引列表
-
-        Returns:
-            包含 success 和 message 的字典
-        """
         if len(mesh_paths) != len(mask_indices):
             raise ValueError("mesh_paths 和 mask_indices 长度必须相同")
 
         request = AssignModels.Request()
         request.mesh_paths = mesh_paths
         request.mask_indices = mask_indices
+        request.session_id = session_id if session_id is not None else self._session_id
 
         future = self._assign_models_client.call_async(request)
-        rclpy.spin_until_future_complete(self._node, future, timeout_sec=10.0)
+        self._wait_for_future(future, timeout_sec=10.0)
 
         if future.result() is not None:
             resp = future.result()
@@ -320,7 +402,7 @@ class FoundationPoseClient:
         send_goal_future = self._pick_place_action_client.send_goal_async(
             goal, feedback_callback=feedback_callback
         )
-        rclpy.spin_until_future_complete(self._node, send_goal_future)
+        self._wait_for_future(send_goal_future, timeout_sec=30.0)
 
         goal_handle = send_goal_future.result()
         if not goal_handle.accepted:
@@ -335,7 +417,7 @@ class FoundationPoseClient:
         self._node.get_logger().info("目标已接受，等待结果...")
 
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self._node, result_future)
+        self._wait_for_future(result_future, timeout_sec=300.0)
 
         result = result_future.result().result
         self._current_goal_handle = None
@@ -397,7 +479,7 @@ class FoundationPoseClient:
 
         self._node.get_logger().info("取消当前 Action...")
         cancel_future = self._current_goal_handle.cancel_goal_async()
-        rclpy.spin_until_future_complete(self._node, cancel_future, timeout_sec=5.0)
+        self._wait_for_future(cancel_future, timeout_sec=5.0)
 
         if cancel_future.result() is not None:
             self._node.get_logger().info("取消请求已发送")
@@ -418,7 +500,7 @@ class FoundationPoseClient:
         request.value = 1.0
 
         future = self._gripper_client.call_async(request)
-        rclpy.spin_until_future_complete(self._node, future, timeout_sec=5.0)
+        self._wait_for_future(future, timeout_sec=5.0)
 
         if future.result() is not None:
             resp = future.result()
@@ -438,7 +520,7 @@ class FoundationPoseClient:
         request.value = 1.0
 
         future = self._gripper_client.call_async(request)
-        rclpy.spin_until_future_complete(self._node, future, timeout_sec=5.0)
+        self._wait_for_future(future, timeout_sec=5.0)
 
         if future.result() is not None:
             resp = future.result()
@@ -462,7 +544,7 @@ class FoundationPoseClient:
         request.value = str(value)
 
         future = self._update_params_client.call_async(request)
-        rclpy.spin_until_future_complete(self._node, future, timeout_sec=5.0)
+        self._wait_for_future(future, timeout_sec=5.0)
 
         if future.result() is not None:
             resp = future.result()
@@ -471,11 +553,27 @@ class FoundationPoseClient:
             raise TimeoutError("参数更新请求超时")
 
     def shutdown(self):
-        """关闭客户端并清理资源"""
-        if self._current_goal_handle is not None:
-            self.cancel_current_action()
+        try:
+            if self._current_goal_handle is not None:
+                self.cancel_current_action()
+        except Exception:
+            pass
 
-        self._node.destroy_node()
+        try:
+            self._executor.shutdown()
+        except Exception:
+            pass
+
+        try:
+            self._node.destroy_node()
+        except Exception:
+            pass
+
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
     def __enter__(self):
         """上下文管理器入口"""

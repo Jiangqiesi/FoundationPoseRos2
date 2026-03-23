@@ -11,17 +11,18 @@
 | 每次测试重启 FoundationPose（加载模型数十秒） | 服务端常驻，模型只加载一次 |
 | 每次测试重启 MoveIt2 + 机械臂连接 | 控制服务端常驻，保持连接 |
 | stdin 手动输入命令 | CLI / Python API 远程触发 |
-| Tkinter / OpenCV 阻塞式 GUI | 全自动分割+分配，可选 Service 覆盖 |
+| Tkinter / OpenCV 阻塞式 GUI | PySide6 GUI 客户端，交互式分割+mask分配+位姿可视化 |
 
 ### 新增文件一览
 
 | 文件 | 作用 |
 |------|------|
 | `foundationpose_msgs/` | ROS2 自定义消息包（1 个 Action + 6 个 Service） |
-| `foundationpose_perception_server.py` | 感知服务端 — 无 GUI，自动分割+跟踪+Service 接口 |
-| `foundationpose_realman_server.py` | 控制服务端 — PickPlace Action Server + Service 接口 |
-| `foundationpose_client.py` | Python API 客户端模块 |
+| `foundationpose_perception_server.py` | 感知服务端 — 4态状态机，客户端触发分割+分配后跟踪 |
+| `foundationpose_realman_server.py` | 控制服务端 — PickPlace Action Server + Service 接口，机械臂延迟连接 |
+| `foundationpose_client.py` | Python API 客户端模块（含后台图像订阅） |
 | `foundationpose_cli.py` | CLI 命令行客户端 |
+| `foundationpose_gui_client.py` | PySide6 GUI 客户端（交互式分割+分配+位姿可视化） |
 | `start_servers.sh` | 一键启动脚本 |
 | `config/pick_place.yaml` | 新增 `server` 配置节（服务名定义） |
 
@@ -66,8 +67,8 @@ bash start_servers.sh --robot-ip 192.168.0.17
 
 该脚本会依次启动：
 1. MoveIt2 demo.launch.py（等待 5 秒初始化）
-2. 感知服务端（自动加载模型 → SAM2 分割 → 分配掩码 → 持续跟踪）
-3. 控制服务端（连接机械臂 → 初始化 MoveIt2 → 等待 Action 请求）
+2. 感知服务端（默认 IDLE 状态，等待客户端触发分割）
+3. 控制服务端（等待客户端请求时才连接机械臂）
 
 可选参数：
 
@@ -167,21 +168,22 @@ python foundationpose_cli.py gripper close   # 关闭夹爪
 ### resegment — 重新分割
 
 ```bash
-python foundationpose_cli.py resegment          # 普通重新分割
-python foundationpose_cli.py resegment --force   # 强制重新分割
+python foundationpose_cli.py resegment --force   # 强制重新分割（运行 SAM2）
+python foundationpose_cli.py resegment            # 停止跟踪，回到 IDLE 状态
 ```
 
-当场景中物体发生变化（新增/移除物体）时使用。服务端会重新运行 SAM2 分割并自动分配掩码。
+`--force` 会触发 SAM2 重新分割并返回 `session_id` 和 `num_masks`。不带 `--force` 仅停止当前跟踪。
 
 ### assign — 手动分配网格模型
 
 ```bash
 python foundationpose_cli.py assign \
     --meshes demo_data/cup/cup.obj demo_data/box/box.stl \
-    --masks 0 1
+    --masks 0 1 \
+    --session-id 1
 ```
 
-覆盖自动分配结果，手动指定网格文件与掩码索引的对应关系。`--meshes` 和 `--masks` 数量必须相同。
+将网格文件与掩码索引对应。`--session-id` 必须与最近一次 `resegment --force` 返回的 `session_id` 一致（不指定则自动使用客户端缓存的最近 session_id）。`--meshes` 和 `--masks` 数量必须相同。
 
 ### status — 查询系统状态
 
@@ -277,12 +279,15 @@ with FoundationPoseClient() as client:
 | `cancel_current_action()` | 取消当前 Action | `bool` |
 | `open_gripper()` | 打开夹爪 | `dict` |
 | `close_gripper()` | 关闭夹爪 | `dict` |
-| `resegment(force=False)` | 重新分割物体 | `dict` |
-| `assign_models(mesh_paths, mask_indices)` | 手动分配网格-掩码 | `dict` |
+| `resegment(force=False)` | 重新分割物体（force=True 运行 SAM2，force=False 仅停止跟踪） | `dict` |
+| `assign_models(mesh_paths, mask_indices, session_id)` | 手动分配网格-掩码（session_id 可选，默认用最近 resegment 返回值） | `dict` |
 | `update_param(param_name, value)` | 更新运动参数 | `dict` |
+| `get_masks_visualization()` | 获取最新 mask 可视化图像 | `Optional[np.ndarray]` |
+| `get_masks_label()` | 获取最新 mask 标签图（像素值=mask_index+1） | `Optional[np.ndarray]` |
+| `get_pose_visualization()` | 获取最新位姿可视化图像 | `Optional[np.ndarray]` |
 | `shutdown()` | 关闭客户端 | `None` |
 
-所有返回 `dict` 的方法都包含 `success` (bool) 和 `message` (str) 字段。
+所有返回 `dict` 的方法都包含 `success` (bool) 和 `message` (str) 字段。`resegment` 额外返回 `session_id` 和 `num_masks`。
 
 ---
 
@@ -293,18 +298,9 @@ with FoundationPoseClient() as client:
 ```yaml
 server:
   perception:
-    auto_assign: true          # 是否自动分配掩码给网格
+    auto_assign: false         # 是否自动分配掩码给网格（默认 false，需客户端手动触发）
     mesh_dir: demo_data        # 网格文件目录
     resegment_on_startup: true # 启动时是否自动分割
-  controller:
-    action_name: /robot/pick_place           # PickPlace Action 名称
-    gripper_service: /controller/gripper     # 夹爪 Service 名称
-    params_service: /controller/update_params # 参数更新 Service 名称
-    status_service: /controller/get_status   # 控制器状态 Service 名称
-  perception_services:
-    resegment: /perception/resegment         # 重新分割 Service 名称
-    assign_models: /perception/assign_models # 模型分配 Service 名称
-    status: /perception/get_status           # 感知状态 Service 名称
 ```
 
 客户端和服务端共享这些配置，修改服务名后两端会自动同步。
@@ -313,11 +309,14 @@ server:
 
 ## ROS2 话题和接口
 
-### 话题（与原项目一致）
+### 话题
 
-| 话题 | 类型 | 说明 |
-|------|------|------|
-| `/Current_OBJ_position_<id>` | `PoseStamped` | 物体位姿（base_link 坐标系） |
+| 话题 | 类型 | QoS | 说明 |
+|------|------|-----|------|
+| `/Current_OBJ_position_<id>` | `PoseStamped` | 默认 | 物体位姿（base_link 坐标系） |
+| `/perception/masks_visualization` | `Image` (rgb8) | transient_local, depth=1 | 分割后的 mask 彩色叠加图（分割完成后发布一次） |
+| `/perception/masks_label` | `Image` (mono8) | transient_local, depth=1 | mask 标签图，像素值=mask_index+1，0=背景 |
+| `/perception/pose_visualization` | `Image` (rgb8) | 默认 | 位姿可视化（跟踪时每帧发布，含 3D 框和坐标轴） |
 
 ### Action
 
@@ -363,8 +362,8 @@ Feedback 的 `stage` 字段取值：
 
 | 名称 | 类型 | 说明 |
 |------|------|------|
-| `/perception/resegment` | `Resegment` | 重新运行 SAM2 分割 |
-| `/perception/assign_models` | `AssignModels` | 手动分配网格-掩码映射 |
+| `/perception/resegment` | `Resegment` | 重新运行 SAM2 分割（force=true）或停止跟踪（force=false） |
+| `/perception/assign_models` | `AssignModels` | 手动分配网格-掩码映射（需携带 session_id） |
 | `/perception/get_status` | `PerceptionStatus` | 查询感知状态 |
 | `/controller/gripper` | `GripperControl` | 夹爪开合控制 |
 | `/controller/update_params` | `UpdateParams` | 运行时参数更新 |
@@ -388,20 +387,45 @@ python foundationpose_cli.py param approach_distance 0.08
 python foundationpose_cli.py pick --objects 1
 ```
 
-### 场景二：场景变化后重新分割
+### 场景二：GUI 交互式分割+分配+跟踪
+
+```bash
+# 启动感知服务端（IDLE 状态）
+python foundationpose_perception_server.py
+
+# 启动 GUI 客户端
+python foundationpose_gui_client.py --mesh-dir demo_data
+```
+
+GUI 操作流程：
+1. 点击 **Resegment** → 服务端运行 SAM2，GUI 显示彩色 mask 叠加图
+2. 右侧列表选择一个模型，在图像上点击对应 mask 区域 → 建立 mask↔模型映射
+3. 重复步骤 2 直到所有需要的 mask 都分配完毕
+4. 点击 **Confirm Assignment** → 服务端开始位姿估计，GUI 切换到实时位姿可视化
+5. 关闭 GUI 窗口时自动通知服务端停止跟踪
+
+### 场景三：场景变化后重新分割
 
 ```bash
 # 场景中物体发生变化
 python foundationpose_cli.py resegment --force
 
+# 查看返回的 session_id 和 num_masks
+# 输出: session_id: 2, num_masks: 3
+
+# 用 session_id 分配模型
+python foundationpose_cli.py assign \
+    --meshes demo_data/ship/ship.obj demo_data/cup/cup.stl \
+    --masks 0 1 --session-id 2
+
 # 查看新的跟踪状态
 python foundationpose_cli.py status
 
 # 继续抓取
-python foundationpose_cli.py pick --objects 1 2 3
+python foundationpose_cli.py pick --objects 1 2
 ```
 
-### 场景三：Python 脚本批量操作
+### 场景四：Python 脚本批量操作
 
 ```python
 from foundationpose_client import FoundationPoseClient
@@ -430,8 +454,10 @@ with FoundationPoseClient() as client:
 | 问题 | 可能原因 | 解决方法 |
 |------|----------|----------|
 | 客户端报 "服务端未在 30 秒内就绪" | 服务端未启动或未完成初始化 | 检查终端 2 的输出，等待 "所有服务端已启动" |
-| 感知服务端启动后无跟踪 | 相机未启动或数据未就绪 | 确认终端 1 的相机节点正常运行 |
+| 感知服务端启动后无跟踪 | 默认 IDLE 状态，需客户端触发 | 使用 GUI 客户端点击 Resegment，或 CLI `resegment --force` |
 | 抓取失败 | 位姿过期或规划失败 | 用 `status` 检查跟踪状态，确认物体在视野内 |
+| 机械臂连接失败 | 机械臂未上电或 IP 不对 | 控制服务端会返回错误而非崩溃，检查 IP 和网络连接 |
+| GUI 图像不更新 | 服务端未在跟踪状态 | 确认已完成 Resegment + Confirm Assignment 流程 |
 | colcon build 失败 | ROS2 环境未 source | 先执行 `source /opt/ros/humble/setup.bash` |
 | pytest 报 launch_testing 错误 | ROS2 插件冲突 | 项目已配置 `pytest.ini` 禁用冲突插件，使用 `pytest tests/` 即可 |
 
@@ -444,9 +470,13 @@ with FoundationPoseClient() as client:
 ```bash
 # 原来的方式（仍然可用）
 python foundationpose_ros_multi.py
-python foundationpose_realman_place.py --robot-ip 192.168.0.17
 
-# 新的方式（推荐）
-bash start_servers.sh --robot-ip 192.168.0.17
+# 新的方式（推荐）— GUI 交互
+python foundationpose_perception_server.py
+python foundationpose_gui_client.py --mesh-dir demo_data
+
+# 新的方式 — CLI 脚本化
+python foundationpose_cli.py resegment --force
+python foundationpose_cli.py assign --meshes demo_data/ship/ship.obj --masks 0 --session-id 1
 python foundationpose_cli.py pick --objects 1 2
 ```

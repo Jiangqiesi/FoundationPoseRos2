@@ -18,13 +18,17 @@ from moveit_configs_utils import MoveItConfigsBuilder
 from moveit_msgs.msg import RobotTrajectory as RobotTrajectoryMsg
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import JointState
 
+from foundationpose_logging import setup_file_logging
+
 PickPlace: Any = getattr(fp_action, "PickPlace")
 ControllerStatus: Any = getattr(fp_srv, "ControllerStatus")
 GripperControl: Any = getattr(fp_srv, "GripperControl")
+PerceptionStatus: Any = getattr(fp_srv, "PerceptionStatus")
 UpdateParams: Any = getattr(fp_srv, "UpdateParams")
 RobotState = importlib.import_module("moveit.core.robot_state").RobotState
 
@@ -71,14 +75,23 @@ class FoundationPoseRealManServer(Node):
     ):
         super().__init__("foundationpose_realman_server")
 
-        self.grasp_offset_config: Dict[int, Tuple[float, float, float]] = {
-            1: (0.0358, 0.1116, 0.1240),
-            2: (0.0858, 0.1116, 0.1240),
-            3: (0.0608, 0.0606, 0.1240),
-            4: (0.0608, 0.0096, 0.1240),
-            5: (0.0608, 0.0606, 0.1125),
+        self.grasp_offset_config: Dict[str, Tuple[float, float, float]] = {
+            "g0801": (0.0358, 0.1116, 0.1240),
+            "g0802": (0.0858, 0.1116, 0.1240),
+            "g0701": (0.0608, 0.0606, 0.1240),
+            "g0601": (0.0608, 0.0096, 0.1240),
+            "g0101": (0.0608, 0.0606, 0.1125),
         }
 
+        self._obj_id_to_mesh_name: Dict[int, str] = {}
+
+    def _lookup_grasp_offset(self, mesh_name: str) -> Tuple[float, float, float]:
+        for key, offset in self.grasp_offset_config.items():
+            if key in mesh_name:
+                return offset
+        return (0.0, 0.0, 0.0)
+
+        self.robot_ip = robot_ip
         self.object_ids = object_ids
         self.offset_z = offset_z
         self.enable_grasp = enable_grasp
@@ -98,6 +111,7 @@ class FoundationPoseRealManServer(Node):
         self._moveit_ready = False
         self._rm_api_lock = threading.Lock()
         self._warned_deg = False
+        self._connect_lock = threading.Lock()
 
         self.callback_group = ReentrantCallbackGroup()
 
@@ -108,66 +122,15 @@ class FoundationPoseRealManServer(Node):
         self._bootstrap_pub_stop = threading.Event()
         self._bootstrap_pub_thread: Optional[threading.Thread] = None
         self.joint_state_timer: Optional[object] = None
+        self.rm_controller: Any = None
+        self.moveit: Any = None
+        self.robot_model: Any = None
+        self.jmg: Any = None
 
-        self.get_logger().info(f"连接 RealMan 机械臂: {robot_ip}")
-        try:
-            self.rm_controller = RM_controller(
-                robot_ip, rm_thread_mode_e.RM_TRIPLE_MODE_E
-            )
-            self.robot_connected = True
-            self.get_logger().info(
-                f"连接成功，当前关节: {self.rm_controller.get_state()}"
-            )
-        except Exception as e:
-            self.get_logger().error(f"连接机械臂失败: {e}")
-            raise
-
-        self._bootstrap_pub_thread = threading.Thread(
-            target=self._bootstrap_publish_joint_states, daemon=True
+        # 不在启动时连接机械臂，等待客户端请求时再懒加载连接
+        self.get_logger().info(
+            f"服务端启动，机械臂 IP: {robot_ip}（延迟连接，等待客户端请求）"
         )
-        self._bootstrap_pub_thread.start()
-
-        try:
-            self.get_logger().info("初始化 MoveIt2...")
-
-            moveit_config = (
-                MoveItConfigsBuilder(robot_name="rm_robot", package_name="rm_moveit2")
-                .robot_description(file_path="config/rm_75_6f_description.urdf.xacro")
-                .trajectory_execution(file_path="config/moveit_controllers.yaml")
-                .moveit_cpp(file_path="config/motion_planning_python_api_tutorial.yaml")
-                .to_moveit_configs()
-            )
-
-            self.moveit = MoveItPy(
-                node_name="moveit_py_node", config_dict=moveit_config.to_dict()
-            )
-            self.get_logger().info("MoveIt2 初始化成功")
-            self.arm = self.moveit.get_planning_component(self.group_name)
-            self.robot_model = self.moveit.get_robot_model()
-            self.jmg = self.robot_model.get_joint_model_group(self.group_name)
-            self.joint_names = self.jmg.active_joint_model_names
-
-            if not self.joint_names:
-                raise RuntimeError(
-                    f"无法从 JointModelGroup({self.group_name}) 获取关节名"
-                )
-
-            self.get_logger().info(f"规划组: {self.group_name}")
-            self.get_logger().info(f"关节名: {self.joint_names}")
-            self._moveit_ready = True
-
-        except Exception as e:
-            self.get_logger().error(f"MoveIt2 初始化失败: {e}")
-            import traceback
-
-            self.get_logger().error(traceback.format_exc())
-            raise
-        finally:
-            self._bootstrap_pub_stop.set()
-            if self._bootstrap_pub_thread is not None:
-                self._bootstrap_pub_thread.join(timeout=1.0)
-
-        self._set_joint_state_timer(joint_state_hz)
 
         for obj_id in self.object_ids:
             topic_name = f"/Current_OBJ_position_{obj_id}"
@@ -211,10 +174,131 @@ class FoundationPoseRealManServer(Node):
             callback_group=self.callback_group,
         )
 
-        self.get_logger().info("控制服务端初始化完成")
+        self._perception_status_client = self.create_client(
+            PerceptionStatus,
+            "/perception/get_status",
+            callback_group=self.callback_group,
+        )
+
+        self.get_logger().info("控制服务端初始化完成（机械臂未连接，按需连接）")
         self.get_logger().info(
             f"抓取功能默认状态: {'启用' if self.enable_grasp else '禁用'}"
         )
+
+        setup_file_logging(self, "logs/realman")
+
+    def _refresh_obj_id_to_mesh_name(self) -> bool:
+        if not self._perception_status_client.wait_for_service(timeout_sec=3.0):
+            self.get_logger().warn("感知状态服务不可用，无法刷新 mesh 名称映射")
+            return False
+
+        req = PerceptionStatus.Request()
+        req.dummy = 0
+        future = self._perception_status_client.call_async(req)
+
+        start = time.monotonic()
+        while not future.done():
+            if time.monotonic() - start > 5.0:
+                self.get_logger().warn("查询感知状态超时")
+                return False
+            time.sleep(0.01)
+
+        resp = future.result()
+        if resp is None:
+            self.get_logger().warn("查询感知状态返回 None")
+            return False
+
+        mapping: Dict[int, str] = {}
+        for oid, name in zip(resp.tracked_object_ids, resp.tracked_mesh_names):
+            mapping[int(oid)] = str(name)
+        self._obj_id_to_mesh_name = mapping
+        self.get_logger().info(f"已刷新物体ID→mesh名称映射: {mapping}")
+        return True
+
+    def _ensure_robot_connected(self) -> bool:
+        """懒加载连接机械臂和初始化 MoveIt2。线程安全，仅在首次需要时执行。
+        返回 True 表示连接成功，False 表示连接失败。"""
+        if self.robot_connected and self._moveit_ready:
+            return True
+
+        with self._connect_lock:
+            # 双重检查，避免并发重复连接
+            if self.robot_connected and self._moveit_ready:
+                return True
+
+            self.get_logger().info(f"正在连接 RealMan 机械臂: {self.robot_ip}")
+            try:
+                self.rm_controller = RM_controller(
+                    self.robot_ip, rm_thread_mode_e.RM_TRIPLE_MODE_E
+                )
+                self.robot_connected = True
+                self.get_logger().info(
+                    f"连接成功，当前关节: {self.rm_controller.get_state()}"
+                )
+            except Exception as e:
+                self.get_logger().error(f"连接机械臂失败: {e}")
+                self.robot_connected = False
+                return False
+
+            self._bootstrap_pub_stop.clear()
+            self._bootstrap_pub_thread = threading.Thread(
+                target=self._bootstrap_publish_joint_states, daemon=True
+            )
+            self._bootstrap_pub_thread.start()
+
+            try:
+                self.get_logger().info("初始化 MoveIt2...")
+
+                moveit_config = (
+                    MoveItConfigsBuilder(
+                        robot_name="rm_robot", package_name="rm_moveit2"
+                    )
+                    .robot_description(
+                        file_path="config/rm_75_6f_description.urdf.xacro"
+                    )
+                    .trajectory_execution(file_path="config/moveit_controllers.yaml")
+                    .moveit_cpp(
+                        file_path="config/motion_planning_python_api_tutorial.yaml"
+                    )
+                    .to_moveit_configs()
+                )
+
+                self.moveit = MoveItPy(
+                    node_name="moveit_py_node", config_dict=moveit_config.to_dict()
+                )
+                self.get_logger().info("MoveIt2 初始化成功")
+                self.arm = self.moveit.get_planning_component(self.group_name)
+                self.robot_model = self.moveit.get_robot_model()
+                self.jmg = self.robot_model.get_joint_model_group(self.group_name)
+                self.joint_names = self.jmg.active_joint_model_names
+
+                if not self.joint_names:
+                    raise RuntimeError(
+                        f"无法从 JointModelGroup({self.group_name}) 获取关节名"
+                    )
+
+                self.get_logger().info(f"规划组: {self.group_name}")
+                self.get_logger().info(f"关节名: {self.joint_names}")
+                self._moveit_ready = True
+
+            except Exception as e:
+                self.get_logger().error(f"MoveIt2 初始化失败: {e}")
+                import traceback
+
+                self.get_logger().error(traceback.format_exc())
+                # 机械臂已连接但 MoveIt 失败，断开连接回退到未连接状态
+                self.robot_connected = False
+                self._moveit_ready = False
+                self.rm_controller = None
+                return False
+            finally:
+                self._bootstrap_pub_stop.set()
+                if self._bootstrap_pub_thread is not None:
+                    self._bootstrap_pub_thread.join(timeout=1.0)
+
+            self._set_joint_state_timer(self.joint_state_hz)
+            self.get_logger().info("机械臂连接和 MoveIt2 初始化完成")
+            return True
 
     def _looks_like_degree(self, joints: List[float]) -> bool:
         return any(abs(v) > 10.0 for v in joints)
@@ -324,6 +408,9 @@ class FoundationPoseRealManServer(Node):
         raise RuntimeError("无法获取有效的机械臂关节状态")
 
     def _publish_joint_state_only(self) -> bool:
+        if not self.robot_connected or self.rm_controller is None:
+            return False
+
         try:
             joints_rad = self._get_hardware_joints_rad(
                 expected_size=len(self.joint_names)
@@ -600,7 +687,8 @@ class FoundationPoseRealManServer(Node):
         pos = pose_msg.pose.position
         orient = pose_msg.pose.orientation
 
-        local_offset = self.grasp_offset_config.get(object_id, (0.0, 0.0, 0.0))
+        mesh_name = self._obj_id_to_mesh_name.get(object_id, "")
+        local_offset = self._lookup_grasp_offset(mesh_name)
         world_offset = self.transform_offset_to_world(local_offset, orient)
 
         grasp_x = pos.x + world_offset[0] + 0.028
@@ -611,10 +699,17 @@ class FoundationPoseRealManServer(Node):
         grasp_quat = self.get_grasp_quat_from_object(orient)
 
         self.get_logger().info(f"开始抓取物体 {object_id}")
+        self.get_logger().info(
+            f"  mesh名称: '{mesh_name}', 本地偏移: {local_offset}, 世界偏移: [{world_offset[0]:.4f}, {world_offset[1]:.4f}, {world_offset[2]:.4f}]"
+        )
+        self.get_logger().info(
+            f"  抓取四元数(xyzw): [{grasp_quat[0]:.4f}, {grasp_quat[1]:.4f}, {grasp_quat[2]:.4f}, {grasp_quat[3]:.4f}]"
+        )
         self.get_logger().info(f"  识别位置: ({pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f})")
         self.get_logger().info(
             f"  抓取位置: ({grasp_x:.3f}, {grasp_y:.3f}, {grasp_z:.3f})"
         )
+        self.get_logger().info(f"  靠近高度: {approach_z:.3f}, 提起高度: {lift_z:.3f}")
 
         if self._should_cancel(goal_handle, "抓取前检测到取消"):
             return False
@@ -718,7 +813,8 @@ class FoundationPoseRealManServer(Node):
         target_orient = target_pose_msg.pose.orientation
         grasp_quat = self.get_grasp_quat_from_object(target_orient)
 
-        local_offset = self.grasp_offset_config.get(source_obj_id, (0.0, 0.0, 0.0))
+        mesh_name = self._obj_id_to_mesh_name.get(source_obj_id, "")
+        local_offset = self._lookup_grasp_offset(mesh_name)
         world_offset = self.transform_offset_to_world(local_offset, target_orient)
 
         place_x = target_pos.x + world_offset[0] + 0.028
@@ -728,7 +824,13 @@ class FoundationPoseRealManServer(Node):
 
         self.get_logger().info(f"开始放置到目标 {target_obj_id}")
         self.get_logger().info(
-            f"放置位置: ({place_x:.3f}, {place_y:.3f}, {place_z:.3f})"
+            f"  源物体: {source_obj_id}, mesh名称: '{mesh_name}', 本地偏移: {local_offset}, 世界偏移: [{world_offset[0]:.4f}, {world_offset[1]:.4f}, {world_offset[2]:.4f}]"
+        )
+        self.get_logger().info(
+            f"  目标识别位置: ({target_pos.x:.3f}, {target_pos.y:.3f}, {target_pos.z:.3f})"
+        )
+        self.get_logger().info(
+            f"  放置位置: ({place_x:.3f}, {place_y:.3f}, {place_z:.3f}), 靠近高度: {approach_z:.3f}"
         )
 
         if self._should_cancel(goal_handle, "放置前检测到取消"):
@@ -796,13 +898,24 @@ class FoundationPoseRealManServer(Node):
     def pick_place_cancel_callback(self, _goal_handle) -> CancelResponse:
         self.get_logger().warn("收到取消请求，准备安全停止")
         self._cancel_requested.set()
-        self.open_gripper(wait=False)
+        if self.robot_connected:
+            self.open_gripper(wait=False)
         return CancelResponse.ACCEPT
 
     def execute_pick_place(self, goal_handle):
         result = PickPlace.Result()
         completed_objects: List[int] = []
         failed_objects: List[int] = []
+
+        if not self._ensure_robot_connected():
+            result.success = False
+            result.message = "机械臂连接失败，无法执行 PickPlace"
+            result.completed_objects = []
+            result.failed_objects = [int(i) for i in goal_handle.request.object_ids]
+            goal_handle.abort()
+            return result
+
+        self._refresh_obj_id_to_mesh_name()
 
         default_enable_grasp = self.enable_grasp
         default_offset_z = self.offset_z
@@ -824,6 +937,10 @@ class FoundationPoseRealManServer(Node):
 
             self.get_logger().info(
                 f"开始执行 PickPlace: objects={object_ids}, target_id={target_id}, total={total_count}"
+            )
+            self.get_logger().info(
+                f"  参数: enable_grasp={self.enable_grasp}, offset_z={self.offset_z:.4f}, "
+                f"approach_distance={self.approach_distance:.4f}, lift_height={self.lift_height:.4f}"
             )
 
             for idx, object_id in enumerate(object_ids):
@@ -919,6 +1036,11 @@ class FoundationPoseRealManServer(Node):
             self.lift_height = default_lift_height
 
     def handle_gripper_service(self, request, response):
+        if not self._ensure_robot_connected():
+            response.success = False
+            response.message = "机械臂未连接，无法控制夹爪"
+            return response
+
         action = request.action.strip().lower()
         if action == "open":
             ok = self.open_gripper()
@@ -994,9 +1116,13 @@ class FoundationPoseRealManServer(Node):
         response.robot_connected = bool(self.robot_connected)
         response.moveit_ready = bool(self._moveit_ready)
         response.currently_executing = bool(self.currently_executing)
-        current_joints = self.get_current_joint_positions()
-        response.joint_names = list(current_joints.keys())
-        response.current_joints = [float(v) for v in current_joints.values()]
+        if self.robot_connected:
+            current_joints = self.get_current_joint_positions()
+            response.joint_names = list(current_joints.keys())
+            response.current_joints = [float(v) for v in current_joints.values()]
+        else:
+            response.joint_names = []
+            response.current_joints = []
         return response
 
     def display_poses(self):
@@ -1076,7 +1202,9 @@ def main():
         server.get_logger().info(
             "Services=/controller/gripper, /controller/update_params, /controller/get_status"
         )
-        rclpy.spin(server)
+        executor = MultiThreadedExecutor(num_threads=4)
+        executor.add_node(server)
+        executor.spin()
 
     except KeyboardInterrupt:
         print("\n收到退出信号，关闭中...")

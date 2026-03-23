@@ -22,7 +22,7 @@ objects:
 
 server:
   perception:
-    auto_assign: true
+    auto_assign: false
     mesh_dir: demo_data
     resegment_on_startup: true
   controller:

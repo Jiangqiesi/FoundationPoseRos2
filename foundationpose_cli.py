@@ -6,6 +6,7 @@ FoundationPose ROS2 命令行接口
 """
 
 import sys
+import signal
 import argparse
 import json
 from foundationpose_client import FoundationPoseClient
@@ -22,29 +23,23 @@ def cmd_pick(args, client):
             f"({fb.completed_count}/{fb.total_count} 完成): {fb.status_message}"
         )
 
-    try:
-        result = client.pick_place(
-            object_ids=args.objects,
-            target_id=args.target,
-            enable_grasp=args.enable_grasp,
-            offset_z=args.offset_z,
-            approach_distance=args.approach_distance,
-            lift_height=args.lift_height,
-            feedback_callback=feedback_callback,
-        )
+    result = client.pick_place(
+        object_ids=args.objects,
+        target_id=args.target,
+        enable_grasp=args.enable_grasp,
+        offset_z=args.offset_z,
+        approach_distance=args.approach_distance,
+        lift_height=args.lift_height,
+        feedback_callback=feedback_callback,
+    )
 
-        print(f"\n结果: {result['message']}")
-        if result["completed_objects"]:
-            print(f"成功: {result['completed_objects']}")
-        if result["failed_objects"]:
-            print(f"失败: {result['failed_objects']}")
+    print(f"\n结果: {result['message']}")
+    if result["completed_objects"]:
+        print(f"成功: {result['completed_objects']}")
+    if result["failed_objects"]:
+        print(f"失败: {result['failed_objects']}")
 
-        return 0 if result["success"] else 1
-
-    except KeyboardInterrupt:
-        print("\n\n检测到 Ctrl+C，取消当前任务...")
-        client.cancel_current_action()
-        return 1
+    return 0 if result["success"] else 1
 
 
 def cmd_gripper(args, client):
@@ -68,6 +63,9 @@ def cmd_resegment(args, client):
     try:
         result = client.resegment(force=args.force)
         print(f"{result['message']}")
+        if result["success"]:
+            print(f"session_id: {result['session_id']}")
+            print(f"num_masks: {result['num_masks']}")
         return 0 if result["success"] else 1
 
     except Exception as e:
@@ -82,7 +80,14 @@ def cmd_assign(args, client):
             print("错误: --meshes 和 --masks 数量必须相同")
             return 1
 
-        result = client.assign_models(mesh_paths=args.meshes, mask_indices=args.masks)
+        session_id = (
+            args.session_id if args.session_id is not None else client.session_id
+        )
+        result = client.assign_models(
+            mesh_paths=args.meshes,
+            mask_indices=args.masks,
+            session_id=session_id,
+        )
         print(f"{result['message']}")
         return 0 if result["success"] else 1
 
@@ -132,7 +137,7 @@ def main():
         "--enable-grasp", type=bool, default=True, help="是否启用夹爪控制（默认: True）"
     )
     pick_parser.add_argument(
-        "--offset-z", type=float, default=0.133, help="Z 轴放置偏移（默认: 0.133）"
+        "--offset-z", type=float, default=0.140, help="Z 轴放置偏移（默认: 0.140）"
     )
     pick_parser.add_argument(
         "--approach-distance",
@@ -160,6 +165,12 @@ def main():
     assign_parser.add_argument(
         "--masks", nargs="+", type=int, required=True, help="对应的掩码索引列表"
     )
+    assign_parser.add_argument(
+        "--session-id",
+        type=int,
+        default=None,
+        help="分割会话 ID（默认使用最近一次 resegment 返回的 session_id）",
+    )
 
     # status 子命令
     subparsers.add_parser("status", help="查询系统状态")
@@ -171,35 +182,57 @@ def main():
 
     args = parser.parse_args()
 
-    # 创建客户端并执行命令
+    client = None
+
+    def _sigint_handler(signum, frame):
+        nonlocal client
+        print("\n\n检测到 Ctrl+C，取消当前任务...")
+        if client is not None:
+            try:
+                client.cancel_current_action()
+            except Exception:
+                pass
+            try:
+                client.shutdown()
+            except Exception:
+                pass
+        sys.exit(1)
+
+    signal.signal(signal.SIGINT, _sigint_handler)
+
     try:
-        with FoundationPoseClient() as client:
-            print("等待服务端就绪...")
-            client.wait_for_servers(timeout_sec=30.0)
-            print("所有服务端已就绪\n")
+        client = FoundationPoseClient()
+        print("等待服务端就绪...")
+        client.wait_for_servers(timeout_sec=30.0)
+        print("所有服务端已就绪\n")
 
-            # 根据子命令分发
-            if args.command == "pick":
-                exit_code = cmd_pick(args, client)
-            elif args.command == "gripper":
-                exit_code = cmd_gripper(args, client)
-            elif args.command == "resegment":
-                exit_code = cmd_resegment(args, client)
-            elif args.command == "assign":
-                exit_code = cmd_assign(args, client)
-            elif args.command == "status":
-                exit_code = cmd_status(args, client)
-            elif args.command == "param":
-                exit_code = cmd_param(args, client)
-            else:
-                print(f"未知命令: {args.command}")
-                exit_code = 1
+        if args.command == "pick":
+            exit_code = cmd_pick(args, client)
+        elif args.command == "gripper":
+            exit_code = cmd_gripper(args, client)
+        elif args.command == "resegment":
+            exit_code = cmd_resegment(args, client)
+        elif args.command == "assign":
+            exit_code = cmd_assign(args, client)
+        elif args.command == "status":
+            exit_code = cmd_status(args, client)
+        elif args.command == "param":
+            exit_code = cmd_param(args, client)
+        else:
+            print(f"未知命令: {args.command}")
+            exit_code = 1
 
-            sys.exit(exit_code)
+        sys.exit(exit_code)
 
     except Exception as e:
         print(f"错误: {e}")
         sys.exit(1)
+    finally:
+        if client is not None:
+            try:
+                client.shutdown()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

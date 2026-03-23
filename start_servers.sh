@@ -72,11 +72,15 @@ sleep 5
 # Source foundationpose_msgs（如果存在）
 # ============================================================================
 echo "[4/6] Source foundationpose_msgs（如果需要）..."
-if [ -d "~/IML/FoundationPoseROS2-client-server-work/foundationpose_msgs/install" ]; then
-  cd ~/IML/FoundationPoseROS2-client-server-work/foundationpose_msgs
+MSGS_DIR=~/IML/FoundationPoseROS2-client-server-work/foundationpose_msgs
+if [ -d "$MSGS_DIR/install" ]; then
+  cd "$MSGS_DIR"
   if [ -f "install/setup.bash" ]; then
     source install/setup.bash
+    echo "✓ foundationpose_msgs 已 source"
   fi
+else
+  echo "⚠ foundationpose_msgs/install 未找到，跳过"
 fi
 
 # ============================================================================
@@ -84,6 +88,7 @@ fi
 # ============================================================================
 echo "[5/6] 启动感知服务器..."
 cd ~/IML/FoundationPoseROS2-client-server-work
+export PYTHONNOUSERSITE=1
 python foundationpose_perception_server.py &
 PERCEPTION_PID=$!
 echo "感知服务器 PID: $PERCEPTION_PID"

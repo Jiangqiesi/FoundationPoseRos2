@@ -5,3 +5,4 @@ bool ready                    # 感知模块是否就绪
 bool segmentation_done        # 分割是否完成
 uint32 num_tracked_objects    # 跟踪的物体数
 uint32[] tracked_object_ids   # 跟踪的物体 ID 列表
+string[] tracked_mesh_names   # 各跟踪物体对应的 mesh 文件名（与 tracked_object_ids 顺序一致）

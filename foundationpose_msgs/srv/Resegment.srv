@@ -4,3 +4,5 @@ bool force
 # 响应
 bool success
 string message
+uint32 session_id
+uint32 num_masks
